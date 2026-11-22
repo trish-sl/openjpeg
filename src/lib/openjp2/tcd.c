@@ -39,6 +39,12 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
+/* Before opj_includes.h, which poisons malloc and free that the SSE */
+/* headers use for _mm_malloc() and _mm_free() */
+#ifdef __SSE2__
+#include <emmintrin.h>
+#endif
+
 #include "opj_includes.h"
 #include "opj_common.h"
 
@@ -2320,8 +2326,29 @@ static OPJ_BOOL opj_tcd_dc_level_shift_decode(opj_tcd_t *p_tcd)
         }
 
         if (l_tccp->qmfbid == 1) {
+#ifdef __SSE2__
+            const __m128i l_shift_v = _mm_set1_epi32(l_tccp->m_dc_level_shift);
+            const __m128i l_min_v = _mm_set1_epi32(l_min);
+            const __m128i l_max_v = _mm_set1_epi32(l_max);
+#endif
             for (j = 0; j < l_height; ++j) {
-                for (i = 0; i < l_width; ++i) {
+                i = 0;
+#ifdef __SSE2__
+                for (; i + 4 <= l_width; i += 4) {
+                    __m128i l_v = _mm_loadu_si128((__m128i*)l_current_ptr);
+                    __m128i l_lt, l_gt;
+                    l_v = _mm_add_epi32(l_v, l_shift_v);
+                    l_lt = _mm_cmplt_epi32(l_v, l_min_v);
+                    l_v = _mm_or_si128(_mm_and_si128(l_lt, l_min_v),
+                                       _mm_andnot_si128(l_lt, l_v));
+                    l_gt = _mm_cmpgt_epi32(l_v, l_max_v);
+                    l_v = _mm_or_si128(_mm_and_si128(l_gt, l_max_v),
+                                       _mm_andnot_si128(l_gt, l_v));
+                    _mm_storeu_si128((__m128i*)l_current_ptr, l_v);
+                    l_current_ptr += 4;
+                }
+#endif
+                for (; i < l_width; ++i) {
                     /* TODO: do addition on int64 ? */
                     *l_current_ptr = opj_int_clamp(*l_current_ptr + l_tccp->m_dc_level_shift, l_min,
                                                    l_max);
@@ -2330,8 +2357,34 @@ static OPJ_BOOL opj_tcd_dc_level_shift_decode(opj_tcd_t *p_tcd)
                 l_current_ptr += l_stride;
             }
         } else {
+#ifdef __SSE2__
+            /* Clamping to [l_min - shift, l_max - shift] before rounding */
+            /* gives the same result as rounding, shifting then clamping, */
+            /* as the bounds are integers. This needs them to be exact in */
+            /* float. _mm_max_ps() returns its second operand for a NaN */
+            /* input, which gives l_min like the scalar code. */
+            const OPJ_INT64 l_lo = (OPJ_INT64)l_min - l_tccp->m_dc_level_shift;
+            const OPJ_INT64 l_hi = (OPJ_INT64)l_max - l_tccp->m_dc_level_shift;
+            const OPJ_BOOL l_simd = l_lo >= -(1 << 24) && l_hi <= (1 << 24);
+            const __m128 l_lo_v = _mm_set1_ps((OPJ_FLOAT32)l_lo);
+            const __m128 l_hi_v = _mm_set1_ps((OPJ_FLOAT32)l_hi);
+            const __m128i l_shift_v = _mm_set1_epi32(l_tccp->m_dc_level_shift);
+#endif
             for (j = 0; j < l_height; ++j) {
-                for (i = 0; i < l_width; ++i) {
+                i = 0;
+#ifdef __SSE2__
+                if (l_simd) {
+                    for (; i + 4 <= l_width; i += 4) {
+                        __m128 l_v = _mm_loadu_ps((OPJ_FLOAT32*)l_current_ptr);
+                        __m128i l_iv;
+                        l_v = _mm_min_ps(_mm_max_ps(l_v, l_lo_v), l_hi_v);
+                        l_iv = _mm_add_epi32(_mm_cvtps_epi32(l_v), l_shift_v);
+                        _mm_storeu_si128((__m128i*)l_current_ptr, l_iv);
+                        l_current_ptr += 4;
+                    }
+                }
+#endif
+                for (; i < l_width; ++i) {
                     OPJ_FLOAT32 l_value = *((OPJ_FLOAT32 *) l_current_ptr);
                     if (l_value > (OPJ_FLOAT32)INT_MAX) {
                         *l_current_ptr = l_max;
