@@ -3367,6 +3367,104 @@ static void opj_v8dwt_decode_step2(opj_v8_t* l, opj_v8_t* w,
 
 #endif
 
+#ifdef __SSE__
+/* One lifting update of the element at k of the n interleaved elements:
+ * X[k] += (X[k - 1] + X[k + 1]) * c, mirrored at both ends exactly as
+ * opj_v8dwt_decode_step2_sse() does it. Does nothing out of [0, n). */
+static INLINE void opj_v8dwt_lift_sse(__m128* OPJ_RESTRICT X, OPJ_INT32 k,
+                                      OPJ_INT32 n, __m128 c)
+{
+    __m128* OPJ_RESTRICT x = X + 2 * k;
+    if (k < 0 || k >= n) {
+        return;
+    }
+    if (k == 0) {
+        x[0] = _mm_add_ps(x[0], _mm_mul_ps(_mm_add_ps(x[2], x[2]), c));
+        x[1] = _mm_add_ps(x[1], _mm_mul_ps(_mm_add_ps(x[3], x[3]), c));
+    } else if (k == n - 1) {
+        c = _mm_add_ps(c, c);
+        x[0] = _mm_add_ps(x[0], _mm_mul_ps(c, x[-2]));
+        x[1] = _mm_add_ps(x[1], _mm_mul_ps(c, x[-1]));
+    } else {
+        x[0] = _mm_add_ps(x[0], _mm_mul_ps(_mm_add_ps(x[-2], x[2]), c));
+        x[1] = _mm_add_ps(x[1], _mm_mul_ps(_mm_add_ps(x[-1], x[3]), c));
+    }
+}
+
+/* Same as the scaling and the four lifting steps of opj_v8dwt_decode() for
+ * a whole (not windowed) line of n >= 8 elements, in a single pass over the
+ * data instead of five: at the low pass element p, X[p] and X[p + 1] are
+ * scaled, then the delta step is done at p, gamma at p - 1, beta at p - 2
+ * and alpha at p - 3, whose inputs are all final for their step by then.
+ * Every element gets the same operations on the same values as with the
+ * separate steps, so the result is identical. */
+static void opj_v8dwt_decode_fused_sse(opj_v8dwt_t* OPJ_RESTRICT dwt,
+                                       OPJ_INT32 a, float two_invK)
+{
+    __m128* OPJ_RESTRICT X = (__m128*) dwt->wavelet;
+    const OPJ_INT32 n = dwt->sn + dwt->dn;
+    const __m128 k_low = _mm_set1_ps(opj_K);
+    const __m128 k_high = _mm_set1_ps(two_invK);
+    const __m128 c_delta = _mm_set1_ps(-opj_dwt_delta);
+    const __m128 c_gamma = _mm_set1_ps(-opj_dwt_gamma);
+    const __m128 c_beta = _mm_set1_ps(-opj_dwt_beta);
+    const __m128 c_alpha = _mm_set1_ps(-opj_dwt_alpha);
+    OPJ_INT32 p = a;
+
+    if (a == 1) {
+        X[0] = _mm_mul_ps(X[0], k_high);
+        X[1] = _mm_mul_ps(X[1], k_high);
+    }
+    /* Head and tail: with bound checks */
+    for (; p < 4 && p < n + 3; p += 2) {
+        if (p < n) {
+            X[2 * p] = _mm_mul_ps(X[2 * p], k_low);
+            X[2 * p + 1] = _mm_mul_ps(X[2 * p + 1], k_low);
+        }
+        if (p + 1 < n) {
+            X[2 * p + 2] = _mm_mul_ps(X[2 * p + 2], k_high);
+            X[2 * p + 3] = _mm_mul_ps(X[2 * p + 3], k_high);
+        }
+        opj_v8dwt_lift_sse(X, p, n, c_delta);
+        opj_v8dwt_lift_sse(X, p - 1, n, c_gamma);
+        opj_v8dwt_lift_sse(X, p - 2, n, c_beta);
+        opj_v8dwt_lift_sse(X, p - 3, n, c_alpha);
+    }
+    /* Body: all four elements have both neighbours */
+    for (; p + 2 < n; p += 2) {
+        __m128* OPJ_RESTRICT x = X + 2 * p;
+        x[0] = _mm_mul_ps(x[0], k_low);
+        x[1] = _mm_mul_ps(x[1], k_low);
+        x[2] = _mm_mul_ps(x[2], k_high);
+        x[3] = _mm_mul_ps(x[3], k_high);
+        x[0] = _mm_add_ps(x[0], _mm_mul_ps(_mm_add_ps(x[-2], x[2]), c_delta));
+        x[1] = _mm_add_ps(x[1], _mm_mul_ps(_mm_add_ps(x[-1], x[3]), c_delta));
+        x[-2] = _mm_add_ps(x[-2], _mm_mul_ps(_mm_add_ps(x[-4], x[0]), c_gamma));
+        x[-1] = _mm_add_ps(x[-1], _mm_mul_ps(_mm_add_ps(x[-3], x[1]), c_gamma));
+        x[-4] = _mm_add_ps(x[-4], _mm_mul_ps(_mm_add_ps(x[-6], x[-2]), c_beta));
+        x[-3] = _mm_add_ps(x[-3], _mm_mul_ps(_mm_add_ps(x[-5], x[-1]), c_beta));
+        x[-6] = _mm_add_ps(x[-6],
+                           _mm_mul_ps(_mm_add_ps(x[-8], x[-4]), c_alpha));
+        x[-5] = _mm_add_ps(x[-5],
+                           _mm_mul_ps(_mm_add_ps(x[-7], x[-3]), c_alpha));
+    }
+    for (; p < n + 3; p += 2) {
+        if (p < n) {
+            X[2 * p] = _mm_mul_ps(X[2 * p], k_low);
+            X[2 * p + 1] = _mm_mul_ps(X[2 * p + 1], k_low);
+        }
+        if (p + 1 < n) {
+            X[2 * p + 2] = _mm_mul_ps(X[2 * p + 2], k_high);
+            X[2 * p + 3] = _mm_mul_ps(X[2 * p + 3], k_high);
+        }
+        opj_v8dwt_lift_sse(X, p, n, c_delta);
+        opj_v8dwt_lift_sse(X, p - 1, n, c_gamma);
+        opj_v8dwt_lift_sse(X, p - 2, n, c_beta);
+        opj_v8dwt_lift_sse(X, p - 3, n, c_alpha);
+    }
+}
+#endif
+
 /* <summary>                             */
 /* Inverse 9-7 wavelet transform in 1-D. */
 /* </summary>                            */
@@ -3395,6 +3493,12 @@ static void opj_v8dwt_decode(opj_v8dwt_t* OPJ_RESTRICT dwt)
         b = 0;
     }
 #ifdef __SSE__
+    if (dwt->win_l_x0 == 0 && dwt->win_l_x1 == (OPJ_UINT32)dwt->sn &&
+            dwt->win_h_x0 == 0 && dwt->win_h_x1 == (OPJ_UINT32)dwt->dn &&
+            dwt->sn + dwt->dn >= 8) {
+        opj_v8dwt_decode_fused_sse(dwt, a, two_invK);
+        return;
+    }
     opj_v8dwt_decode_step1_sse(dwt->wavelet + a, dwt->win_l_x0, dwt->win_l_x1,
                                _mm_set1_ps(opj_K));
     opj_v8dwt_decode_step1_sse(dwt->wavelet + b, dwt->win_h_x0, dwt->win_h_x1,
