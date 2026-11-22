@@ -3088,7 +3088,27 @@ static void opj_v8dwt_interleave_h(opj_v8dwt_t* OPJ_RESTRICT dwt,
         if (remaining_height >= NB_ELTS_V8 && ((OPJ_SIZE_T) a & 0x0f) == 0 &&
                 ((OPJ_SIZE_T) bi & 0x0f) == 0) {
             /* Fast code path */
-            for (i = x0; i < x1; ++i) {
+            i = x0;
+#ifdef __SSE__
+            /* Transpose blocks of 4 columns x 4 rows */
+            for (; i + 4 <= x1; i += 4) {
+                OPJ_UINT32 r;
+                OPJ_FLOAT32* OPJ_RESTRICT dst = bi + i * 2 * NB_ELTS_V8;
+                for (r = 0; r < NB_ELTS_V8; r += 4) {
+                    const OPJ_FLOAT32* src = a + i + r * (OPJ_SIZE_T)width;
+                    __m128 r0 = _mm_loadu_ps(src);
+                    __m128 r1 = _mm_loadu_ps(src + width);
+                    __m128 r2 = _mm_loadu_ps(src + 2 * (OPJ_SIZE_T)width);
+                    __m128 r3 = _mm_loadu_ps(src + 3 * (OPJ_SIZE_T)width);
+                    _MM_TRANSPOSE4_PS(r0, r1, r2, r3);
+                    _mm_store_ps(dst + r, r0);
+                    _mm_store_ps(dst + r + 2 * NB_ELTS_V8, r1);
+                    _mm_store_ps(dst + r + 4 * NB_ELTS_V8, r2);
+                    _mm_store_ps(dst + r + 6 * NB_ELTS_V8, r3);
+                }
+            }
+#endif
+            for (; i < x1; ++i) {
                 OPJ_UINT32 j = i;
                 OPJ_FLOAT32* OPJ_RESTRICT dst = bi + i * 2 * NB_ELTS_V8;
                 dst[0] = a[j];
@@ -3427,6 +3447,44 @@ typedef struct {
     OPJ_UINT32 nb_rows;
 } opj_dwt97_decode_h_job_t;
 
+/* Write back NB_ELTS_V8 rows of rw samples from the interleaved buffer */
+static void opj_v8dwt_store_h(const opj_v8_t* OPJ_RESTRICT wavelet,
+                              OPJ_FLOAT32* OPJ_RESTRICT aj,
+                              OPJ_UINT32 rw,
+                              OPJ_SIZE_T w)
+{
+    OPJ_UINT32 k = 0;
+#ifdef __SSE__
+    /* Transpose blocks of 4 samples x 4 rows */
+    for (; k + 4 <= rw; k += 4) {
+        OPJ_UINT32 r;
+        for (r = 0; r < NB_ELTS_V8; r += 4) {
+            OPJ_FLOAT32* OPJ_RESTRICT dst = aj + k + r * w;
+            __m128 r0 = _mm_load_ps(wavelet[k].f + r);
+            __m128 r1 = _mm_load_ps(wavelet[k + 1].f + r);
+            __m128 r2 = _mm_load_ps(wavelet[k + 2].f + r);
+            __m128 r3 = _mm_load_ps(wavelet[k + 3].f + r);
+            _MM_TRANSPOSE4_PS(r0, r1, r2, r3);
+            _mm_storeu_ps(dst, r0);
+            _mm_storeu_ps(dst + w, r1);
+            _mm_storeu_ps(dst + 2 * w, r2);
+            _mm_storeu_ps(dst + 3 * w, r3);
+        }
+    }
+#endif
+    /* To be adapted if NB_ELTS_V8 changes */
+    for (; k < rw; k++) {
+        aj[k      ] = wavelet[k].f[0];
+        aj[k + w  ] = wavelet[k].f[1];
+        aj[k + w * 2] = wavelet[k].f[2];
+        aj[k + w * 3] = wavelet[k].f[3];
+        aj[k + w * 4] = wavelet[k].f[4];
+        aj[k + w * 5] = wavelet[k].f[5];
+        aj[k + w * 6] = wavelet[k].f[6];
+        aj[k + w * 7] = wavelet[k].f[7];
+    }
+}
+
 static void opj_dwt97_decode_h_func(void* user_data, opj_tls_t* tls)
 {
     OPJ_UINT32 j;
@@ -3442,23 +3500,9 @@ static void opj_dwt97_decode_h_func(void* user_data, opj_tls_t* tls)
 
     aj = job->aj;
     for (j = 0; j + NB_ELTS_V8 <= job->nb_rows; j += NB_ELTS_V8) {
-        OPJ_UINT32 k;
         opj_v8dwt_interleave_h(&job->h, aj, job->w, NB_ELTS_V8);
         opj_v8dwt_decode(&job->h);
-
-        /* To be adapted if NB_ELTS_V8 changes */
-        for (k = 0; k < job->rw; k++) {
-            aj[k      ] = job->h.wavelet[k].f[0];
-            aj[k + (OPJ_SIZE_T)w  ] = job->h.wavelet[k].f[1];
-            aj[k + (OPJ_SIZE_T)w * 2] = job->h.wavelet[k].f[2];
-            aj[k + (OPJ_SIZE_T)w * 3] = job->h.wavelet[k].f[3];
-        }
-        for (k = 0; k < job->rw; k++) {
-            aj[k + (OPJ_SIZE_T)w * 4] = job->h.wavelet[k].f[4];
-            aj[k + (OPJ_SIZE_T)w * 5] = job->h.wavelet[k].f[5];
-            aj[k + (OPJ_SIZE_T)w * 6] = job->h.wavelet[k].f[6];
-            aj[k + (OPJ_SIZE_T)w * 7] = job->h.wavelet[k].f[7];
-        }
+        opj_v8dwt_store_h(job->h.wavelet, aj, job->rw, w);
 
         aj += w * NB_ELTS_V8;
     }
@@ -3572,23 +3616,9 @@ OPJ_BOOL opj_dwt_decode_tile_97(opj_thread_pool_t* tp,
 
         if (num_threads <= 1 || rh < 2 * NB_ELTS_V8) {
             for (j = 0; j + (NB_ELTS_V8 - 1) < rh; j += NB_ELTS_V8) {
-                OPJ_UINT32 k;
                 opj_v8dwt_interleave_h(&h, aj, w, NB_ELTS_V8);
                 opj_v8dwt_decode(&h);
-
-                /* To be adapted if NB_ELTS_V8 changes */
-                for (k = 0; k < rw; k++) {
-                    aj[k      ] = h.wavelet[k].f[0];
-                    aj[k + (OPJ_SIZE_T)w  ] = h.wavelet[k].f[1];
-                    aj[k + (OPJ_SIZE_T)w * 2] = h.wavelet[k].f[2];
-                    aj[k + (OPJ_SIZE_T)w * 3] = h.wavelet[k].f[3];
-                }
-                for (k = 0; k < rw; k++) {
-                    aj[k + (OPJ_SIZE_T)w * 4] = h.wavelet[k].f[4];
-                    aj[k + (OPJ_SIZE_T)w * 5] = h.wavelet[k].f[5];
-                    aj[k + (OPJ_SIZE_T)w * 6] = h.wavelet[k].f[6];
-                    aj[k + (OPJ_SIZE_T)w * 7] = h.wavelet[k].f[7];
-                }
+                opj_v8dwt_store_h(h.wavelet, aj, rw, w);
 
                 aj += w * NB_ELTS_V8;
             }
