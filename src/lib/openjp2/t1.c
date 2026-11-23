@@ -1725,6 +1725,25 @@ static void opj_t1_destroy_wrapper(void* t1)
     opj_t1_destroy((opj_t1_t*) t1);
 }
 
+/* With MSVC for x86-64: the rows of a code-block are far apart in the */
+/* tile, so the hardware prefetchers do not see them coming, and */
+/* opj_t1_clbl_decode_processor() asks for the row OPJ_T1_PREFETCH_ROWS */
+/* ahead of the one it writes (only in the 9-7 case: measured slower in */
+/* the 5-3 one) */
+#if defined(_MSC_VER) && defined(_M_X64) && !defined(_M_ARM64EC)
+#define OPJ_T1_PREFETCH_ROWS 4
+
+static INLINE void opj_t1_prefetch_row(const void* row, OPJ_UINT32 n)
+{
+    const char* p = (const char*)row;
+    OPJ_UINT32 o;
+    for (o = 0; o < n * 4; o += 64) {
+        _mm_prefetch(p + o, _MM_HINT_T0);
+    }
+    _mm_prefetch(p + n * 4 - 1, _MM_HINT_T0);
+}
+#endif
+
 static void opj_t1_clbl_decode_processor(void* user_data, opj_tls_t* tls)
 {
     opj_tcd_cblk_dec_t* cblk;
@@ -1973,6 +1992,12 @@ static void opj_t1_clbl_decode_processor(void* user_data, opj_tls_t* tls)
                                                          tile_w + (OPJ_SIZE_T)x];
         for (j = 0; j < cblk_h; ++j) {
             OPJ_FLOAT32* OPJ_RESTRICT tiledp2 = tiledp;
+#ifdef OPJ_T1_PREFETCH_ROWS
+            if (j + OPJ_T1_PREFETCH_ROWS < cblk_h) {
+                opj_t1_prefetch_row(tiledp + OPJ_T1_PREFETCH_ROWS * (OPJ_SIZE_T)tile_w,
+                                    cblk_w);
+            }
+#endif
             for (i = 0; i < cblk_w; ++i) {
                 OPJ_FLOAT32 tmp = (OPJ_FLOAT32) * datap * stepsize;
                 *tiledp2 = tmp;
