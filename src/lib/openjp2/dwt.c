@@ -3219,6 +3219,41 @@ static INLINE void opj_v8dwt_interleave_v(opj_v8dwt_t* OPJ_RESTRICT dwt,
     }
 }
 
+/* Number of groups of NB_ELTS_V8 columns done at a time by the vertical */
+/* pass of opj_dwt_decode_tile_97() */
+#define NB_GROUPS_V8 4
+
+/* Same as opj_v8dwt_interleave_v() with nb_elts_read = NB_ELTS_V8, for */
+/* NB_GROUPS_V8 groups of columns, group g going to the buffer */
+/* dwt->wavelet + g * stride: each row is read in one go */
+static void opj_v8dwt_interleave_v_groups(opj_v8dwt_t* OPJ_RESTRICT dwt,
+        OPJ_SIZE_T stride,
+        OPJ_FLOAT32* OPJ_RESTRICT a,
+        OPJ_UINT32 width)
+{
+    opj_v8_t* OPJ_RESTRICT bi = dwt->wavelet + dwt->cas;
+    OPJ_UINT32 i, g;
+
+    for (i = dwt->win_l_x0; i < dwt->win_l_x1; ++i) {
+        for (g = 0; g < NB_GROUPS_V8; ++g) {
+            memcpy(&bi[g * stride + i * 2],
+                   &a[i * (OPJ_SIZE_T)width + g * NB_ELTS_V8],
+                   NB_ELTS_V8 * sizeof(OPJ_FLOAT32));
+        }
+    }
+
+    a += (OPJ_UINT32)dwt->sn * (OPJ_SIZE_T)width;
+    bi = dwt->wavelet + 1 - dwt->cas;
+
+    for (i = dwt->win_h_x0; i < dwt->win_h_x1; ++i) {
+        for (g = 0; g < NB_GROUPS_V8; ++g) {
+            memcpy(&bi[g * stride + i * 2],
+                   &a[i * (OPJ_SIZE_T)width + g * NB_ELTS_V8],
+                   NB_ELTS_V8 * sizeof(OPJ_FLOAT32));
+        }
+    }
+}
+
 static void opj_v8dwt_interleave_partial_v(opj_v8dwt_t* OPJ_RESTRICT dwt,
         opj_sparse_array_int32_t* sa,
         OPJ_UINT32 sa_col,
@@ -3616,6 +3651,7 @@ OPJ_BOOL opj_dwt_decode_tile_97(opj_thread_pool_t* tp,
 {
     opj_v8dwt_t h;
     opj_v8dwt_t v;
+    opj_v8dwt_t vg;
 
     opj_tcd_resolution_t* res = tilec->resolutions;
 
@@ -3637,11 +3673,14 @@ OPJ_BOOL opj_dwt_decode_tile_97(opj_thread_pool_t* tp,
 
     l_data_size = opj_dwt_max_resolution(res, numres);
     /* overflow check */
-    if (l_data_size > (SIZE_MAX / sizeof(opj_v8_t))) {
+    if (l_data_size > (SIZE_MAX / (NB_GROUPS_V8 * sizeof(opj_v8_t)))) {
         /* FIXME event manager error callback */
         return OPJ_FALSE;
     }
-    h.wavelet = (opj_v8_t*) opj_aligned_malloc(l_data_size * sizeof(opj_v8_t));
+    /* NB_GROUPS_V8 times: the vertical pass does NB_GROUPS_V8 groups of */
+    /* columns at a time */
+    h.wavelet = (opj_v8_t*) opj_aligned_malloc(NB_GROUPS_V8 * l_data_size *
+                                               sizeof(opj_v8_t));
     if (!h.wavelet) {
         /* FIXME event manager error callback */
         return OPJ_FALSE;
@@ -3756,7 +3795,29 @@ OPJ_BOOL opj_dwt_decode_tile_97(opj_thread_pool_t* tp,
 
         aj = (OPJ_FLOAT32*) tilec->data;
         if (num_threads <= 1 || rw < 2 * NB_ELTS_V8) {
-            for (j = rw; j > (NB_ELTS_V8 - 1); j -= NB_ELTS_V8) {
+            /* NB_GROUPS_V8 groups of NB_ELTS_V8 columns at a time, so */
+            /* that whole cache lines of the tile are read and written */
+            vg = v;
+            for (j = rw; j > (NB_GROUPS_V8 * NB_ELTS_V8 - 1);
+                    j -= NB_GROUPS_V8 * NB_ELTS_V8) {
+                OPJ_UINT32 k, g;
+
+                opj_v8dwt_interleave_v_groups(&v, l_data_size, aj, w);
+                for (g = 0; g < NB_GROUPS_V8; ++g) {
+                    vg.wavelet = v.wavelet + g * l_data_size;
+                    opj_v8dwt_decode(&vg);
+                }
+
+                for (k = 0; k < rh; ++k) {
+                    for (g = 0; g < NB_GROUPS_V8; ++g) {
+                        memcpy(&aj[k * (OPJ_SIZE_T)w + g * NB_ELTS_V8],
+                               &v.wavelet[g * l_data_size + k],
+                               NB_ELTS_V8 * sizeof(OPJ_FLOAT32));
+                    }
+                }
+                aj += NB_GROUPS_V8 * NB_ELTS_V8;
+            }
+            for (; j > (NB_ELTS_V8 - 1); j -= NB_ELTS_V8) {
                 OPJ_UINT32 k;
 
                 opj_v8dwt_interleave_v(&v, aj, w, NB_ELTS_V8);
