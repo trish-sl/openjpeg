@@ -721,6 +721,7 @@ typedef struct opj_t1_dec_asm {
 
 void opj_t1_dec_refpass_64x64_x64(opj_t1_dec_asm_t *st);
 void opj_t1_dec_sigpass_64x64_x64(opj_t1_dec_asm_t *st);
+void opj_t1_dec_clnpass_64x64_x64(opj_t1_dec_asm_t *st);
 
 /** Whether the CPU has BMI1 and BMI2, that t1_dec_x64.asm needs: */
 /** 0 not known yet, 1 yes, 2 no */
@@ -1473,6 +1474,15 @@ static void opj_t1_dec_clnpass_64x64_novsc(
     opj_t1_t *t1,
     OPJ_INT32 bpno)
 {
+#ifdef OPJ_T1_DEC_X64_ASM
+    if (opj_t1_dec_asm_ok()) {
+        opj_t1_dec_asm_t st;
+        opj_t1_dec_asm_load(t1, &st, (1 << bpno) | ((1 << bpno) >> 1));
+        opj_t1_dec_clnpass_64x64_x64(&st);
+        opj_t1_dec_asm_store(t1, &st);
+        return;
+    }
+#endif
     opj_t1_dec_clnpass_internal(t1, bpno, OPJ_FALSE, 64, 64, 66);
 }
 
