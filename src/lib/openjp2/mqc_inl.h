@@ -184,6 +184,34 @@ static INLINE OPJ_UINT32 opj_mqc_raw_decode(opj_mqc_t *mqc)
     } \
 }
 
+/* Same as opj_mqc_decode_macro(), but the MPS / LPS decision and the */
+/* conditional exchange are done with masks instead of branches. Faster for */
+/* the contexts whose decisions are hard to predict (sign, refinement, */
+/* significance propagation), slower for the very skewed ones. */
+#define opj_mqc_decode_nobranch_macro(d, mqc, curctx, a, c, ct) \
+{ \
+    const OPJ_UINT32 l_state = *(curctx); \
+    const OPJ_UINT32 l_qeval = opj_mqc_dec_state_qeval(l_state); \
+    /* all ones on the LPS path, (c >> 16) < qeval */ \
+    const OPJ_UINT32 l_lps_mask = 0U - ((c < (l_state & 0xFFFF0000U)) ? 1U : 0U); \
+    OPJ_UINT32 l_lps, l_n, l_next, l_renorm_mask; \
+    a -= l_qeval; \
+    /* 1 if the decoded symbol is the LPS */ \
+    l_lps = (l_lps_mask & 1U) ^ ((a < l_qeval) ? 1U : 0U); \
+    d = opj_mqc_dec_state_mps(l_state) ^ l_lps; \
+    /* number of bits to renormalize: on the MPS path, 0 if a >= 0x8000, */ \
+    /* else 1 or 2 as a >= 0x8000 - 0x5601 */ \
+    l_n = (opj_mqc_dec_state_nlps_shift(l_state) & l_lps_mask) | \
+          ((((a < 0x8000U) ? 1U : 0U) + ((a < 0x4000U) ? 1U : 0U)) & ~l_lps_mask); \
+    /* the state changes when there is a renormalization */ \
+    l_next = (mqc)->dec_trans[(l_state & 0xFFU) + l_lps]; \
+    l_renorm_mask = 0U - ((l_n != 0U) ? 1U : 0U); \
+    *(curctx) = l_state ^ ((l_state ^ l_next) & l_renorm_mask); \
+    c -= (l_state & 0xFFFF0000U) & ~l_lps_mask; \
+    a ^= (a ^ l_qeval) & l_lps_mask; \
+    opj_mqc_renormd_n_macro(mqc, a, c, ct, l_n); \
+}
+
 #define DOWNLOAD_MQC_DEC_VARIABLES(mqc, curctx, a, c, ct) \
         register OPJ_UINT32 *curctx = mqc->dec_curctx; \
         register OPJ_UINT32 c = mqc->c; \
