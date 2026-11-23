@@ -2186,8 +2186,10 @@ static OPJ_BOOL opj_t1_decode_cblk(opj_t1_t *t1,
     opj_mqc_setstate(mqc, T1_CTXNO_AGG, 0, 3);
     opj_mqc_setstate(mqc, T1_CTXNO_ZC, 0, 4);
 
-    if (cblk->corrupted) {
-        assert(cblk->numchunks == 0);
+    /* A code-block marked corrupted (its data ran past the end of a
+     * truncated codestream) keeps the segments of the earlier, complete
+     * packets (opj_t2_read_packet_data()): decode those. */
+    if (cblk->corrupted && cblk->numchunks == 0) {
         return OPJ_TRUE;
     }
 

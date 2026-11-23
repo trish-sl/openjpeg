@@ -64,6 +64,10 @@ typedef struct opj_bio {
     OPJ_UINT32 buf;
     /** coder : number of bits free to write. decoder : number of bits read */
     OPJ_UINT32 ct;
+    /** decoder : set when a read needed a byte past the end of the buffer, so
+     * that the bits returned from then on are zero padding, not data. Cleared
+     * by opj_bio_init_dec() / opj_bio_init_enc(). */
+    OPJ_BOOL error;
 } opj_bio_t;
 
 /** @name Exported functions */
@@ -133,6 +137,13 @@ Passes the ending bits (coming from flushing)
 @return Returns OPJ_TRUE if successful, returns OPJ_FALSE otherwise
 */
 OPJ_BOOL opj_bio_inalign(opj_bio_t *bio);
+/**
+Tells whether the decoder read past the end of its buffer since it was
+initialised (the bits read from then on are zero padding)
+@param bio BIO handle
+@return Returns OPJ_TRUE if it did
+*/
+OPJ_BOOL opj_bio_error(const opj_bio_t *bio);
 /* ----------------------------------------------------------------------- */
 /*@}*/
 

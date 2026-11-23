@@ -157,6 +157,12 @@ static OPJ_BOOL opj_t2_init_seg(opj_tcd_cblk_dec_t* cblk,
                                 OPJ_UINT32 cblksty,
                                 OPJ_UINT32 first);
 
+static OPJ_BOOL opj_t2_truncated_packet_header(opj_cp_t *p_cp,
+        opj_bio_t *p_bio,
+        OPJ_BYTE **p_header_data_start,
+        OPJ_UINT32 *p_modified_length,
+        opj_event_mgr_t *p_manager);
+
 /*@}*/
 
 /*@}*/
@@ -1155,6 +1161,17 @@ static OPJ_BOOL opj_t2_read_packet_header(opj_t2_t* p_t2,
     opj_bio_init_dec(l_bio, l_header_data, *l_modified_length_ptr);
 
     l_present = opj_bio_read(l_bio, 1);
+    if (opj_bio_error(l_bio)) {
+        /* No data left for this packet header (truncated codestream): the 0
+         * read is padding, not an empty packet */
+        if (!opj_t2_truncated_packet_header(l_cp, l_bio, l_header_data_start,
+                                            l_modified_length_ptr, p_manager)) {
+            return OPJ_FALSE;
+        }
+        *p_is_data_present = OPJ_FALSE;
+        *p_data_read = (OPJ_UINT32)(l_current_data - p_src_data);
+        return OPJ_TRUE;
+    }
     JAS_FPRINTF(stderr, "present=%d \n", l_present);
     if (!l_present) {
         /* TODO MSD: no test to control the output of this function*/
@@ -1334,9 +1351,20 @@ static OPJ_BOOL opj_t2_read_packet_header(opj_t2_t* p_t2,
         }
     }
 
-    if (!opj_bio_inalign(l_bio)) {
-        opj_bio_destroy(l_bio);
-        return OPJ_FALSE;
+    /* opj_bio_inalign() fails only when it reads past the end of the data,
+     * which opj_bio_error() then reports */
+    opj_bio_inalign(l_bio);
+    if (opj_bio_error(l_bio)) {
+        /* The packet header runs past the end of the data (truncated
+         * codestream): the inclusion, pass and length values read from the
+         * zero padding are garbage, don't read data with them */
+        if (!opj_t2_truncated_packet_header(l_cp, l_bio, l_header_data_start,
+                                            l_modified_length_ptr, p_manager)) {
+            return OPJ_FALSE;
+        }
+        *p_is_data_present = OPJ_FALSE;
+        *p_data_read = (OPJ_UINT32)(l_current_data - p_src_data);
+        return OPJ_TRUE;
     }
 
     l_header_data += opj_bio_numbytes(l_bio);
@@ -1425,9 +1453,10 @@ static OPJ_BOOL opj_t2_read_packet_data(opj_t2_t* p_t2,
             if (partial_buffer || l_cblk->corrupted) {
                 /* if a previous segment in this packet couldn't be decoded,
                  * or if this code block was corrupted in a previous layer,
-                 * then mark it as corrupted.
+                 * then mark it as corrupted, so that no more data is added
+                 * to it. Keep the segments it has from the earlier packets:
+                 * they are complete, and T1 decodes them.
                  */
-                l_cblk->numchunks = 0;
                 l_cblk->corrupted = OPJ_TRUE;
                 continue;
             }
@@ -1462,11 +1491,12 @@ static OPJ_BOOL opj_t2_read_packet_data(opj_t2_t* p_t2,
                                       l_seg->newlen, p_max_length, cblkno, p_pi->precno, bandno, p_pi->resno,
                                       p_pi->compno);
                         /* skip this codeblock (and following ones in this
-                         * packet) since it is a partial read
+                         * packet) since it is a partial read. Keep the
+                         * segments it has from the earlier packets: they
+                         * are complete, and T1 decodes them.
                          */
                         partial_buffer = OPJ_TRUE;
                         l_cblk->corrupted = OPJ_TRUE;
-                        l_cblk->numchunks = 0;
                         break;
                     }
                 }
@@ -1655,6 +1685,35 @@ static OPJ_BOOL opj_t2_skip_packet_data(opj_t2_t* p_t2,
     return OPJ_TRUE;
 }
 
+
+/* A packet header read past the end of its data (truncated codestream),
+ * p_bio says so. Strict mode: an error. Otherwise the packet is taken as
+ * empty and the header bytes there are consumed, so the packets after it are
+ * read as empty too and the data of the earlier ones is decoded. Destroys
+ * p_bio. */
+static OPJ_BOOL opj_t2_truncated_packet_header(opj_cp_t *p_cp,
+        opj_bio_t *p_bio,
+        OPJ_BYTE **p_header_data_start,
+        OPJ_UINT32 *p_modified_length,
+        opj_event_mgr_t *p_manager)
+{
+    OPJ_UINT32 l_consumed = (OPJ_UINT32)opj_bio_numbytes(p_bio);
+    opj_bio_destroy(p_bio);
+    if (p_cp->strict) {
+        opj_event_msg(p_manager, EVT_ERROR, "Truncated packet header\n");
+        return OPJ_FALSE;
+    }
+    if (*p_modified_length != 0) {
+        /* (nothing to say for the packets after the end of the data) */
+        opj_event_msg(p_manager, EVT_WARNING, "Truncated packet header\n");
+    }
+    if (l_consumed > *p_modified_length) {
+        l_consumed = *p_modified_length;
+    }
+    *p_header_data_start += l_consumed;
+    *p_modified_length -= l_consumed;
+    return OPJ_TRUE;
+}
 
 static OPJ_BOOL opj_t2_init_seg(opj_tcd_cblk_dec_t* cblk,
                                 OPJ_UINT32 index,
