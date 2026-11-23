@@ -41,7 +41,10 @@ ST_A            equ 40      ; OPJ_UINT32
 ST_C            equ 44      ; OPJ_UINT32
 ST_CT           equ 48      ; OPJ_UINT32
 ST_EOBS         equ 52      ; OPJ_UINT32 end_of_byte_stream_counter
-ST_HALF         equ 56      ; OPJ_INT32: poshalf of the refinement pass
+ST_HALF         equ 56      ; OPJ_INT32: poshalf (refinement) or oneplushalf (significance)
+ST_LUTZC        equ 64      ; const OPJ_BYTE *: lut_ctxno_zc of the band
+ST_LUTSC        equ 72      ; const OPJ_BYTE *: lut_ctxno_sc
+ST_LUTSPB       equ 80      ; const OPJ_BYTE *: lut_spb
 
 ; flags (t1.h)
 T1_SIGMA_THIS   equ 10h
@@ -56,11 +59,15 @@ L_TRANS         equ 8
 L_HALF          equ 16
 L_COLEND        equ 24      ; end of the flags of the current stripe
 L_STRIPES       equ 32      ; stripes left
-FRAME_SIZE           equ 40
+L_LUTZC         equ 40
+L_LUTSPB        equ 48
+L_SPB           equ 56
+FRAME_SIZE      equ 72
 
 ; registers
 ;   r8d a, r9d c, r10d ct, r11 bp, rsi flagsp, rdi data, ebx flags,
-;   r12d r13d r14d the states of the contexts CTX_MAG + 0, 1, 2,
+;   refinement pass: r12d r13d r14d the states of the contexts CTX_MAG + 0, 1, 2,
+;   significance pass: r12 the context states, r13 the current one, r14 lut_ctxno_sc,
 ;   rax rcx rdx rbp r15 temporaries
 
 ; Decodes a decision of the MQ decoder, as opj_mqc_decode_nobranch_macro()
@@ -288,5 +295,178 @@ refpass_next:
     pop     rbx
     ret
 opj_t1_dec_refpass_64x64_x64 endp
+
+; One sample of the significance pass, as opj_t1_dec_sigpass_step_mqc_macro()
+; without vertically causal context
+SIGPASS_STEP macro ci
+    local skip, done_sig
+    test    ebx, (T1_SIGMA_THIS or T1_PI_THIS) shl (3 * ci)
+    jnz     skip
+    test    ebx, T1_SIGMA_NEIGH shl (3 * ci)
+    jz      skip
+    ; zero coding context: opj_t1_getctxno_zc()
+    mov     eax, ebx
+if ci ne 0
+    shr     eax, 3 * ci
+endif
+    and     eax, T1_SIGMA_NEIGH
+    mov     rdx, qword ptr [rsp + L_LUTZC]
+    movzx   eax, byte ptr [rdx + rax]
+    lea     r13, [r12 + rax * 4]
+    mov     eax, dword ptr [r13]
+    MQ_DECODE_NOBRANCH
+    mov     dword ptr [r13], ecx
+    test    ebp, ebp
+    jz      done_sig
+    ; sign coding: opj_t1_getctxtno_sc_or_spb_index()
+    mov     eax, ebx
+if ci ne 0
+    shr     eax, 3 * ci
+endif
+    and     eax, 0AAh
+    mov     edx, dword ptr [rsi - 4]
+    shr     edx, 19 + 3 * ci
+    and     edx, 1
+    or      eax, edx
+    mov     edx, dword ptr [rsi + 4]
+    shr     edx, 17 + 3 * ci
+    and     edx, 4
+    or      eax, edx
+    mov     edx, ebx
+if ci eq 0
+    shr     edx, 14
+else
+    shr     edx, 15 + (ci - 1) * 3
+endif
+    and     edx, 16
+    or      eax, edx
+    mov     edx, ebx
+    shr     edx, 16 + 3 * ci
+    and     edx, 64
+    or      eax, edx
+    movzx   ecx, byte ptr [r14 + rax]
+    lea     r13, [r12 + rcx * 4]
+    mov     rdx, qword ptr [rsp + L_LUTSPB]
+    movzx   eax, byte ptr [rdx + rax]
+    mov     dword ptr [rsp + L_SPB], eax
+    mov     eax, dword ptr [r13]
+    MQ_DECODE_NOBRANCH
+    mov     dword ptr [r13], ecx
+    xor     ebp, dword ptr [rsp + L_SPB]
+    ; data = v ? -oneplushalf : oneplushalf
+    mov     eax, dword ptr [rsp + L_HALF]
+    mov     edx, eax
+    neg     edx
+    test    ebp, ebp
+    cmovnz  eax, edx
+    mov     dword ptr [rdi + 256 * ci], eax
+    ; opj_t1_update_flags_macro()
+    or      dword ptr [rsi - 4], 20h shl (3 * ci)
+    or      dword ptr [rsi + 4], 8h shl (3 * ci)
+    mov     eax, ebp
+    shl     eax, 19 + 3 * ci
+    or      eax, T1_SIGMA_THIS shl (3 * ci)
+    or      ebx, eax
+if ci eq 0
+    mov     eax, ebp
+    shl     eax, 31
+    or      eax, 10000h
+    or      dword ptr [rsi - 4 * 66], eax
+    or      dword ptr [rsi - 4 * 66 - 4], 20000h
+    or      dword ptr [rsi - 4 * 66 + 4], 8000h
+endif
+if ci eq 3
+    mov     eax, ebp
+    shl     eax, 18
+    or      eax, 2
+    or      dword ptr [rsi + 4 * 66], eax
+    or      dword ptr [rsi + 4 * 66 - 4], 4
+    or      dword ptr [rsi + 4 * 66 + 4], 1
+endif
+done_sig:
+    or      ebx, T1_PI_THIS shl (3 * ci)
+skip:
+endm
+
+; void opj_t1_dec_sigpass_64x64_x64(opj_t1_dec_asm_t *st)
+opj_t1_dec_sigpass_64x64_x64 proc frame
+    push    rbx
+    .pushreg rbx
+    push    rbp
+    .pushreg rbp
+    push    rsi
+    .pushreg rsi
+    push    rdi
+    .pushreg rdi
+    push    r12
+    .pushreg r12
+    push    r13
+    .pushreg r13
+    push    r14
+    .pushreg r14
+    push    r15
+    .pushreg r15
+    sub     rsp, FRAME_SIZE
+    .allocstack FRAME_SIZE
+    .endprolog
+
+    mov     qword ptr [rsp + L_STATE], rcx
+    mov     rax, qword ptr [rcx + ST_TRANS]
+    mov     qword ptr [rsp + L_TRANS], rax
+    mov     eax, dword ptr [rcx + ST_HALF]
+    mov     dword ptr [rsp + L_HALF], eax
+    mov     rax, qword ptr [rcx + ST_LUTZC]
+    mov     qword ptr [rsp + L_LUTZC], rax
+    mov     rax, qword ptr [rcx + ST_LUTSPB]
+    mov     qword ptr [rsp + L_LUTSPB], rax
+    mov     r14, qword ptr [rcx + ST_LUTSC]
+    mov     r12, qword ptr [rcx + ST_CTXS]
+    mov     rdi, qword ptr [rcx + ST_DATA]
+    mov     rsi, qword ptr [rcx + ST_FLAGSP]
+    mov     r11, qword ptr [rcx + ST_BP]
+    mov     r8d, dword ptr [rcx + ST_A]
+    mov     r9d, dword ptr [rcx + ST_C]
+    mov     r10d, dword ptr [rcx + ST_CT]
+    lea     rax, [rsi + 4 * 64]
+    mov     qword ptr [rsp + L_COLEND], rax
+    mov     dword ptr [rsp + L_STRIPES], 16
+
+sigpass_col:
+    mov     ebx, dword ptr [rsi]
+    test    ebx, ebx
+    jz      sigpass_next
+    SIGPASS_STEP 0
+    SIGPASS_STEP 1
+    SIGPASS_STEP 2
+    SIGPASS_STEP 3
+    mov     dword ptr [rsi], ebx
+sigpass_next:
+    add     rsi, 4
+    add     rdi, 4
+    cmp     rsi, qword ptr [rsp + L_COLEND]
+    jb      sigpass_col
+    add     rsi, 8
+    add     rdi, 3 * 64 * 4
+    add     qword ptr [rsp + L_COLEND], 4 * 66
+    dec     dword ptr [rsp + L_STRIPES]
+    jnz     sigpass_col
+
+    mov     rcx, qword ptr [rsp + L_STATE]
+    mov     qword ptr [rcx + ST_BP], r11
+    mov     dword ptr [rcx + ST_A], r8d
+    mov     dword ptr [rcx + ST_C], r9d
+    mov     dword ptr [rcx + ST_CT], r10d
+
+    add     rsp, FRAME_SIZE
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rdi
+    pop     rsi
+    pop     rbp
+    pop     rbx
+    ret
+opj_t1_dec_sigpass_64x64_x64 endp
 
 end
