@@ -175,9 +175,11 @@ static OPJ_BOOL opj_tcd_t1_decode(opj_tcd_t *p_tcd,
 static OPJ_BOOL opj_tcd_dwt_decode(opj_tcd_t *p_tcd);
 
 static OPJ_BOOL opj_tcd_mct_decode(opj_tcd_t *p_tcd,
-                                   opj_event_mgr_t *p_manager);
+                                   opj_event_mgr_t *p_manager,
+                                   OPJ_UINT32* p_dc_first_compno);
 
-static OPJ_BOOL opj_tcd_dc_level_shift_decode(opj_tcd_t *p_tcd);
+static OPJ_BOOL opj_tcd_dc_level_shift_decode(opj_tcd_t *p_tcd,
+        OPJ_UINT32 first_compno);
 
 
 static OPJ_BOOL opj_tcd_dc_level_shift_encode(opj_tcd_t *p_tcd);
@@ -1564,6 +1566,8 @@ OPJ_BOOL opj_tcd_decode_tile(opj_tcd_t *p_tcd,
 {
     OPJ_UINT32 l_data_read;
     OPJ_UINT32 compno;
+    /* the components from which the DC level shift remains to be done */
+    OPJ_UINT32 l_dc_first_compno = 0;
 
     p_tcd->tcd_tileno = p_tile_no;
     p_tcd->tcp = &(p_tcd->cp->tcps[p_tile_no]);
@@ -1785,14 +1789,14 @@ OPJ_BOOL opj_tcd_decode_tile(opj_tcd_t *p_tcd,
     /*----------------MCT-------------------*/
     /* FIXME _ProfStart(PGROUP_MCT); */
     if
-    (! opj_tcd_mct_decode(p_tcd, p_manager)) {
+    (! opj_tcd_mct_decode(p_tcd, p_manager, &l_dc_first_compno)) {
         return OPJ_FALSE;
     }
     /* FIXME _ProfStop(PGROUP_MCT); */
 
     /* FIXME _ProfStart(PGROUP_DC_SHIFT); */
     if
-    (! opj_tcd_dc_level_shift_decode(p_tcd)) {
+    (! opj_tcd_dc_level_shift_decode(p_tcd, l_dc_first_compno)) {
         return OPJ_FALSE;
     }
     /* FIXME _ProfStop(PGROUP_DC_SHIFT); */
@@ -2117,7 +2121,131 @@ static OPJ_BOOL opj_tcd_dwt_decode(opj_tcd_t *p_tcd)
     return OPJ_TRUE;
 }
 
-static OPJ_BOOL opj_tcd_mct_decode(opj_tcd_t *p_tcd, opj_event_mgr_t *p_manager)
+/* With MSVC for x86-64 */
+#if defined(_MSC_VER) && defined(_M_X64) && !defined(_M_ARM64EC) && \
+        defined(__SSE2__)
+#define OPJ_TCD_MCT_DC_FUSED
+#endif
+
+#ifdef OPJ_TCD_MCT_DC_FUSED
+/* The inverse irreversible MCT of opj_mct_decode_real() and the DC level */
+/* shift of opj_tcd_dc_level_shift_decode() of the first 3 components, in */
+/* one pass over the samples instead of two, when the latter has nothing */
+/* else to do (no stride) and takes its SSE2 code path. The operations */
+/* are the same, in the same order, so the results are identical. */
+/* Returns OPJ_FALSE, having done nothing, when it does not apply. */
+static OPJ_BOOL opj_tcd_mct_dc_level_shift_decode_real(opj_tcd_t *p_tcd,
+        OPJ_SIZE_T n)
+{
+    opj_tcd_tile_t * l_tile = p_tcd->tcd_image->tiles;
+    OPJ_INT32* l_ptr[3];
+    OPJ_INT32 l_min[3], l_max[3], l_shift[3];
+    OPJ_FLOAT32 l_lo[3], l_hi[3];
+    OPJ_UINT32 c;
+    OPJ_SIZE_T i;
+    __m128 vrv, vgu, vgv, vbu;
+    __m128 vlo0, vlo1, vlo2, vhi0, vhi1, vhi2;
+    __m128i vsh0, vsh1, vsh2;
+
+    if (p_tcd->used_component != NULL || n == 0) {
+        return OPJ_FALSE;
+    }
+    for (c = 0; c < 3; ++c) {
+        const opj_tcd_tilecomp_t* l_tile_comp = l_tile->comps + c;
+        const opj_tccp_t* l_tccp = p_tcd->tcp->tccps + c;
+        const opj_image_comp_t* l_img_comp = p_tcd->image->comps + c;
+        const opj_tcd_resolution_t* l_res = l_tile_comp->resolutions +
+                                            l_img_comp->resno_decoded;
+        const opj_tcd_resolution_t* l_full = l_tile_comp->resolutions +
+                                             l_tile_comp->minimum_num_resolutions - 1;
+        OPJ_INT64 l_lo64, l_hi64;
+        /* what opj_tcd_dc_level_shift_decode() would do: the same samples */
+        /* (no stride), and its SSE2 code path */
+        if (l_tccp->qmfbid != 0 || l_img_comp->prec == 0 ||
+                l_img_comp->prec > 31 ||
+                l_res->x1 - l_res->x0 != l_full->x1 - l_full->x0 ||
+                (OPJ_SIZE_T)(l_res->x1 - l_res->x0) *
+                (OPJ_SIZE_T)(l_res->y1 - l_res->y0) != n) {
+            return OPJ_FALSE;
+        }
+        if (l_img_comp->sgnd) {
+            l_min[c] = -(1 << (l_img_comp->prec - 1));
+            l_max[c] = (1 << (l_img_comp->prec - 1)) - 1;
+        } else {
+            l_min[c] = 0;
+            l_max[c] = (OPJ_INT32)((1U << l_img_comp->prec) - 1);
+        }
+        l_shift[c] = l_tccp->m_dc_level_shift;
+        l_lo64 = (OPJ_INT64)l_min[c] - l_shift[c];
+        l_hi64 = (OPJ_INT64)l_max[c] - l_shift[c];
+        if (!(l_lo64 >= -(1 << 24) && l_hi64 <= (1 << 24))) {
+            return OPJ_FALSE;
+        }
+        l_lo[c] = (OPJ_FLOAT32)l_lo64;
+        l_hi[c] = (OPJ_FLOAT32)l_hi64;
+        l_ptr[c] = l_tile_comp->data;
+    }
+
+    vrv = _mm_set1_ps(1.402f);
+    vgu = _mm_set1_ps(0.34413f);
+    vgv = _mm_set1_ps(0.71414f);
+    vbu = _mm_set1_ps(1.772f);
+    vlo0 = _mm_set1_ps(l_lo[0]);
+    vlo1 = _mm_set1_ps(l_lo[1]);
+    vlo2 = _mm_set1_ps(l_lo[2]);
+    vhi0 = _mm_set1_ps(l_hi[0]);
+    vhi1 = _mm_set1_ps(l_hi[1]);
+    vhi2 = _mm_set1_ps(l_hi[2]);
+    vsh0 = _mm_set1_epi32(l_shift[0]);
+    vsh1 = _mm_set1_epi32(l_shift[1]);
+    vsh2 = _mm_set1_epi32(l_shift[2]);
+    for (i = 0; i + 4 <= n; i += 4) {
+        const __m128 vy = _mm_loadu_ps((const OPJ_FLOAT32*)(l_ptr[0] + i));
+        const __m128 vu = _mm_loadu_ps((const OPJ_FLOAT32*)(l_ptr[1] + i));
+        const __m128 vv = _mm_loadu_ps((const OPJ_FLOAT32*)(l_ptr[2] + i));
+        __m128 vr = _mm_add_ps(vy, _mm_mul_ps(vv, vrv));
+        __m128 vg = _mm_sub_ps(_mm_sub_ps(vy, _mm_mul_ps(vu, vgu)),
+                               _mm_mul_ps(vv, vgv));
+        __m128 vb = _mm_add_ps(vy, _mm_mul_ps(vu, vbu));
+        vr = _mm_min_ps(_mm_max_ps(vr, vlo0), vhi0);
+        vg = _mm_min_ps(_mm_max_ps(vg, vlo1), vhi1);
+        vb = _mm_min_ps(_mm_max_ps(vb, vlo2), vhi2);
+        _mm_storeu_si128((__m128i*)(l_ptr[0] + i),
+                         _mm_add_epi32(_mm_cvtps_epi32(vr), vsh0));
+        _mm_storeu_si128((__m128i*)(l_ptr[1] + i),
+                         _mm_add_epi32(_mm_cvtps_epi32(vg), vsh1));
+        _mm_storeu_si128((__m128i*)(l_ptr[2] + i),
+                         _mm_add_epi32(_mm_cvtps_epi32(vb), vsh2));
+    }
+    /* the scalar code of both */
+    for (; i < n; ++i) {
+        OPJ_FLOAT32 y, u, v, rgb[3];
+        memcpy(&y, l_ptr[0] + i, sizeof(y));
+        memcpy(&u, l_ptr[1] + i, sizeof(u));
+        memcpy(&v, l_ptr[2] + i, sizeof(v));
+        rgb[0] = y + (v * 1.402f);
+        rgb[1] = y - (u * 0.34413f) - (v * (0.71414f));
+        rgb[2] = y + (u * 1.772f);
+        for (c = 0; c < 3; ++c) {
+            const OPJ_FLOAT32 l_value = rgb[c];
+            if (l_value > (OPJ_FLOAT32)INT_MAX) {
+                l_ptr[c][i] = l_max[c];
+            } else if (l_value < INT_MIN) {
+                l_ptr[c][i] = l_min[c];
+            } else {
+                /* Do addition on int64 to avoid overflows */
+                OPJ_INT64 l_value_int = (OPJ_INT64)opj_lrintf(l_value);
+                l_ptr[c][i] = (OPJ_INT32)opj_int64_clamp(l_value_int + l_shift[c],
+                              l_min[c], l_max[c]);
+            }
+        }
+    }
+    return OPJ_TRUE;
+}
+#endif
+
+static OPJ_BOOL opj_tcd_mct_decode(opj_tcd_t *p_tcd, opj_event_mgr_t *p_manager,
+                                   OPJ_UINT32* p_dc_first_compno)
 {
     opj_tcd_tile_t * l_tile = p_tcd->tcd_image->tiles;
     opj_tcp_t * l_tcp = p_tcd->tcp;
@@ -2245,6 +2373,14 @@ static OPJ_BOOL opj_tcd_mct_decode(opj_tcd_t *p_tcd, opj_event_mgr_t *p_manager)
                                    l_samples);
                 }
             } else {
+#ifdef OPJ_TCD_MCT_DC_FUSED
+                if (p_tcd->whole_tile_decoding &&
+                        opj_tcd_mct_dc_level_shift_decode_real(p_tcd, l_samples)) {
+                    /* the DC level shift of these components is done too */
+                    *p_dc_first_compno = 3;
+                    return OPJ_TRUE;
+                }
+#endif
                 if (p_tcd->whole_tile_decoding) {
                     opj_mct_decode_real((OPJ_FLOAT32*)l_tile->comps[0].data,
                                         (OPJ_FLOAT32*)l_tile->comps[1].data,
@@ -2268,7 +2404,8 @@ static OPJ_BOOL opj_tcd_mct_decode(opj_tcd_t *p_tcd, opj_event_mgr_t *p_manager)
 }
 
 
-static OPJ_BOOL opj_tcd_dc_level_shift_decode(opj_tcd_t *p_tcd)
+static OPJ_BOOL opj_tcd_dc_level_shift_decode(opj_tcd_t *p_tcd,
+        OPJ_UINT32 first_compno)
 {
     OPJ_UINT32 compno;
     opj_tcd_tilecomp_t * l_tile_comp = 00;
@@ -2282,11 +2419,11 @@ static OPJ_BOOL opj_tcd_dc_level_shift_decode(opj_tcd_t *p_tcd)
     OPJ_UINT32 l_stride;
 
     l_tile = p_tcd->tcd_image->tiles;
-    l_tile_comp = l_tile->comps;
-    l_tccp = p_tcd->tcp->tccps;
-    l_img_comp = p_tcd->image->comps;
+    l_tile_comp = l_tile->comps + first_compno;
+    l_tccp = p_tcd->tcp->tccps + first_compno;
+    l_img_comp = p_tcd->image->comps + first_compno;
 
-    for (compno = 0; compno < l_tile->numcomps;
+    for (compno = first_compno; compno < l_tile->numcomps;
             compno++, ++l_img_comp, ++l_tccp, ++l_tile_comp) {
 
         if (p_tcd->used_component != NULL && !p_tcd->used_component[compno]) {
