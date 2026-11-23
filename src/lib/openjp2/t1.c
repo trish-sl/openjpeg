@@ -51,6 +51,16 @@
 #include <immintrin.h>
 #endif
 
+/* OPJ_T1_DEC_X64_ASM is defined by the build when t1_dec_x64.asm is */
+/* assembled with it (MSVC, x86-64) */
+#if defined(OPJ_T1_DEC_X64_ASM) && !(defined(_MSC_VER) && defined(_M_X64) && \
+        !defined(_M_ARM64EC))
+#undef OPJ_T1_DEC_X64_ASM
+#endif
+#ifdef OPJ_T1_DEC_X64_ASM
+#include <intrin.h>
+#endif
+
 #if defined(__GNUC__)
 #pragma GCC poison malloc calloc realloc free
 #endif
@@ -1022,10 +1032,90 @@ static void opj_t1_dec_refpass_raw(
         } \
 }
 
+#ifdef OPJ_T1_DEC_X64_ASM
+
+/** State of the passes of t1_dec_x64.asm, see the offsets there */
+typedef struct opj_t1_dec_asm {
+    OPJ_INT32 *data;
+    opj_flag_t *flagsp;
+    OPJ_UINT32 *ctxs;
+    const OPJ_UINT32 *dec_trans;
+    OPJ_BYTE *bp;
+    OPJ_UINT32 a;
+    OPJ_UINT32 c;
+    OPJ_UINT32 ct;
+    OPJ_UINT32 end_of_byte_stream_counter;
+    OPJ_INT32 half;
+    OPJ_UINT32 unused;
+} opj_t1_dec_asm_t;
+
+void opj_t1_dec_refpass_64x64_x64(opj_t1_dec_asm_t *st);
+
+/** Whether the CPU has BMI1 and BMI2, that t1_dec_x64.asm needs: */
+/** 0 not known yet, 1 yes, 2 no */
+static volatile int opj_t1_dec_asm_cpu = 0;
+
+static OPJ_BOOL opj_t1_dec_asm_ok(void)
+{
+    int cpu = opj_t1_dec_asm_cpu;
+    if (cpu == 0) {
+        int regs[4];
+        cpu = 2;
+        __cpuid(regs, 0);
+        if (regs[0] >= 7) {
+            __cpuidex(regs, 7, 0);
+            /* EBX bit 3 BMI1, bit 8 BMI2 */
+            if ((regs[1] & (1 << 3)) && (regs[1] & (1 << 8))) {
+                cpu = 1;
+            }
+        }
+        opj_t1_dec_asm_cpu = cpu;
+    }
+    return cpu == 1;
+}
+
+static void opj_t1_dec_asm_load(opj_t1_t *t1, opj_t1_dec_asm_t *st,
+                                OPJ_INT32 half)
+{
+    opj_mqc_t *mqc = &(t1->mqc);
+    st->data = t1->data;
+    st->flagsp = &t1->flags[66 + 1];
+    st->ctxs = mqc->dec_ctxs;
+    st->dec_trans = mqc->dec_trans;
+    st->bp = mqc->bp;
+    st->a = mqc->a;
+    st->c = mqc->c;
+    st->ct = mqc->ct;
+    st->end_of_byte_stream_counter = mqc->end_of_byte_stream_counter;
+    st->half = half;
+    st->unused = 0;
+}
+
+static void opj_t1_dec_asm_store(opj_t1_t *t1, const opj_t1_dec_asm_t *st)
+{
+    opj_mqc_t *mqc = &(t1->mqc);
+    mqc->bp = st->bp;
+    mqc->a = st->a;
+    mqc->c = st->c;
+    mqc->ct = st->ct;
+    mqc->end_of_byte_stream_counter = st->end_of_byte_stream_counter;
+}
+
+#endif /* OPJ_T1_DEC_X64_ASM */
+
 static void opj_t1_dec_refpass_mqc_64x64(
     opj_t1_t *t1,
     OPJ_INT32 bpno)
 {
+#ifdef OPJ_T1_DEC_X64_ASM
+    if (opj_t1_dec_asm_ok()) {
+        opj_t1_dec_asm_t st;
+        opj_t1_dec_asm_load(t1, &st, (1 << bpno) >> 1);
+        opj_t1_dec_refpass_64x64_x64(&st);
+        opj_t1_dec_asm_store(t1, &st);
+        return;
+    }
+#endif
     opj_t1_dec_refpass_mqc_internal(t1, bpno, 64, 64, 66);
 }
 
