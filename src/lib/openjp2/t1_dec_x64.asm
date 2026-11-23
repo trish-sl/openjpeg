@@ -469,4 +469,315 @@ sigpass_next:
     ret
 opj_t1_dec_sigpass_64x64_x64 endp
 
+; Cleanup pass
+
+CTX_AGG         equ 17
+CTX_UNI         equ 18
+L_CTXP          equ 64      ; context of the sign decision being decoded
+L_RUN           equ 40      ; first bit of the run length (L_LUTZC is unused here)
+
+; Shifts a and c left by edx bits, as opj_mqc_renormd_n_macro()
+; clobbers eax, ecx, edx
+MQ_RENORM_N macro
+    local fast, ahead, ahead_done, slow_loop, nobyte, b_normal, b_stuff, done
+    cmp     r10d, edx
+    jae     fast
+ahead:
+    cmp     r10d, 8
+    ja      ahead_done
+    cmp     byte ptr [r11], 0FFh
+    je      ahead_done
+    inc     r11
+    movzx   eax, byte ptr [r11]
+    mov     ecx, 8
+    sub     ecx, r10d
+    shlx    eax, eax, ecx
+    add     r9d, eax
+    add     r10d, 8
+    jmp     ahead
+ahead_done:
+    cmp     r10d, edx
+    jae     fast
+slow_loop:
+    test    r10d, r10d
+    jnz     nobyte
+    movzx   eax, byte ptr [r11 + 1]
+    cmp     byte ptr [r11], 0FFh
+    jne     b_normal
+    cmp     eax, 8Fh
+    jbe     b_stuff
+    add     r9d, 0FF00h
+    mov     r10d, 8
+    mov     rax, qword ptr [rsp + L_STATE]
+    inc     dword ptr [rax + ST_EOBS]
+    jmp     nobyte
+b_stuff:
+    inc     r11
+    shl     eax, 9
+    add     r9d, eax
+    mov     r10d, 7
+    jmp     nobyte
+b_normal:
+    inc     r11
+    shl     eax, 8
+    add     r9d, eax
+    mov     r10d, 8
+nobyte:
+    add     r8d, r8d
+    add     r9d, r9d
+    dec     r10d
+    cmp     r8d, 8000h
+    jb      slow_loop
+    jmp     done
+fast:
+    shlx    r8d, r8d, edx
+    shlx    r9d, r9d, edx
+    sub     r10d, edx
+done:
+endm
+
+; Decodes a decision of the MQ decoder with branches, as opj_mqc_decode_macro(),
+; for the skewed contexts: the MPS without renormalization is the fast path.
+; in: r15 the context; jumps to t0 if the decision is 0, to t1 if it is 1
+; clobbers eax, ecx, edx, ebp
+MQ_DECODE_BR macro t0, t1
+    local lps, mpsx, xchg
+    mov     edx, dword ptr [r15]
+    mov     eax, edx
+    shr     eax, 16                     ; qeval
+    mov     ecx, edx
+    and     ecx, 0FFFF0000h
+    sub     r8d, eax
+    cmp     r9d, ecx
+    jb      lps
+    sub     r9d, ecx
+    test    r8d, 8000h
+    jz      mpsx
+    test    dl, 2
+    jz      t0
+    jmp     t1
+lps:
+    xor     ecx, ecx
+    cmp     r8d, eax
+    setae   cl                          ; LPS if a >= qeval
+    mov     r8d, eax
+    jmp     xchg
+mpsx:
+    xor     ecx, ecx
+    cmp     r8d, eax
+    setb    cl                          ; LPS if a < qeval
+xchg:
+    mov     ebp, edx
+    shr     ebp, 1
+    and     ebp, 1
+    xor     ebp, ecx                    ; the decision
+    movzx   eax, dl
+    add     eax, ecx
+    mov     rcx, qword ptr [rsp + L_TRANS]
+    mov     eax, dword ptr [rcx + rax * 4]
+    mov     dword ptr [r15], eax
+    bsr     edx, r8d
+    xor     edx, 15                     ; bits to renormalize a
+    MQ_RENORM_N
+    test    ebp, ebp
+    jz      t0
+    jmp     t1
+endm
+
+; Sign decoding of a sample that becomes significant in the cleanup pass:
+; the second half of opj_t1_dec_clnpass_step_macro()
+CLNPASS_SIGN macro ci
+    mov     eax, ebx
+if ci ne 0
+    shr     eax, 3 * ci
+endif
+    and     eax, 0AAh
+    mov     edx, dword ptr [rsi - 4]
+    shr     edx, 19 + 3 * ci
+    and     edx, 1
+    or      eax, edx
+    mov     edx, dword ptr [rsi + 4]
+    shr     edx, 17 + 3 * ci
+    and     edx, 4
+    or      eax, edx
+    mov     edx, ebx
+if ci eq 0
+    shr     edx, 14
+else
+    shr     edx, 15 + (ci - 1) * 3
+endif
+    and     edx, 16
+    or      eax, edx
+    mov     edx, ebx
+    shr     edx, 16 + 3 * ci
+    and     edx, 64
+    or      eax, edx
+    movzx   ecx, byte ptr [r14 + rax]
+    lea     rcx, [r12 + rcx * 4]
+    mov     qword ptr [rsp + L_CTXP], rcx
+    mov     rdx, qword ptr [rsp + L_LUTSPB]
+    movzx   edx, byte ptr [rdx + rax]
+    mov     dword ptr [rsp + L_SPB], edx
+    mov     eax, dword ptr [rcx]
+    MQ_DECODE_NOBRANCH
+    mov     rdx, qword ptr [rsp + L_CTXP]
+    mov     dword ptr [rdx], ecx
+    xor     ebp, dword ptr [rsp + L_SPB]
+    ; data = v ? -oneplushalf : oneplushalf
+    mov     eax, dword ptr [rsp + L_HALF]
+    mov     edx, eax
+    neg     edx
+    test    ebp, ebp
+    cmovnz  eax, edx
+    mov     dword ptr [rdi + 256 * ci], eax
+    ; opj_t1_update_flags_macro()
+    or      dword ptr [rsi - 4], 20h shl (3 * ci)
+    or      dword ptr [rsi + 4], 8h shl (3 * ci)
+    mov     eax, ebp
+    shl     eax, 19 + 3 * ci
+    or      eax, T1_SIGMA_THIS shl (3 * ci)
+    or      ebx, eax
+if ci eq 0
+    mov     eax, ebp
+    shl     eax, 31
+    or      eax, 10000h
+    or      dword ptr [rsi - 4 * 66], eax
+    or      dword ptr [rsi - 4 * 66 - 4], 20000h
+    or      dword ptr [rsi - 4 * 66 + 4], 8000h
+endif
+if ci eq 3
+    mov     eax, ebp
+    shl     eax, 18
+    or      eax, 2
+    or      dword ptr [rsi + 4 * 66], eax
+    or      dword ptr [rsi + 4 * 66 - 4], 4
+    or      dword ptr [rsi + 4 * 66 + 4], 1
+endif
+endm
+
+; One sample of the cleanup pass, outside of the run mode:
+; opj_t1_dec_clnpass_step_macro() with check_flags and not partial
+CLNPASS_STEP macro ci, sign, next
+    test    ebx, (T1_SIGMA_THIS or T1_PI_THIS) shl (3 * ci)
+    jnz     next
+    mov     eax, ebx
+if ci ne 0
+    shr     eax, 3 * ci
+endif
+    and     eax, T1_SIGMA_NEIGH
+    movzx   eax, byte ptr [r13 + rax]
+    lea     r15, [r12 + rax * 4]
+    MQ_DECODE_BR next, sign
+sign:
+    CLNPASS_SIGN ci
+endm
+
+; void opj_t1_dec_clnpass_64x64_x64(opj_t1_dec_asm_t *st)
+; The cleanup pass of a 64x64 code-block without vertically causal context,
+; as opj_t1_dec_clnpass_internal(), without the segmentation symbol
+opj_t1_dec_clnpass_64x64_x64 proc frame
+    push    rbx
+    .pushreg rbx
+    push    rbp
+    .pushreg rbp
+    push    rsi
+    .pushreg rsi
+    push    rdi
+    .pushreg rdi
+    push    r12
+    .pushreg r12
+    push    r13
+    .pushreg r13
+    push    r14
+    .pushreg r14
+    push    r15
+    .pushreg r15
+    sub     rsp, FRAME_SIZE
+    .allocstack FRAME_SIZE
+    .endprolog
+
+    mov     qword ptr [rsp + L_STATE], rcx
+    mov     rax, qword ptr [rcx + ST_TRANS]
+    mov     qword ptr [rsp + L_TRANS], rax
+    mov     eax, dword ptr [rcx + ST_HALF]
+    mov     dword ptr [rsp + L_HALF], eax
+    mov     rax, qword ptr [rcx + ST_LUTSPB]
+    mov     qword ptr [rsp + L_LUTSPB], rax
+    mov     r13, qword ptr [rcx + ST_LUTZC]
+    mov     r14, qword ptr [rcx + ST_LUTSC]
+    mov     r12, qword ptr [rcx + ST_CTXS]
+    mov     rdi, qword ptr [rcx + ST_DATA]
+    mov     rsi, qword ptr [rcx + ST_FLAGSP]
+    mov     r11, qword ptr [rcx + ST_BP]
+    mov     r8d, dword ptr [rcx + ST_A]
+    mov     r9d, dword ptr [rcx + ST_C]
+    mov     r10d, dword ptr [rcx + ST_CT]
+    lea     rax, [rsi + 4 * 64]
+    mov     qword ptr [rsp + L_COLEND], rax
+    mov     dword ptr [rsp + L_STRIPES], 16
+    jmp     clnpass_col
+
+    align   16
+clnpass_col:
+    mov     ebx, dword ptr [rsi]
+    test    ebx, ebx
+    jnz     clnpass_s0
+    ; run mode: 4 insignificant samples without significant neighbours
+    lea     r15, [r12 + 4 * CTX_AGG]
+    MQ_DECODE_BR clnpass_next, clnpass_run
+clnpass_run:
+    mov     eax, dword ptr [r12 + 4 * CTX_UNI]
+    MQ_DECODE_NOBRANCH
+    mov     dword ptr [rsp + L_RUN], ebp
+    mov     eax, ecx
+    MQ_DECODE_NOBRANCH
+    mov     dword ptr [r12 + 4 * CTX_UNI], ecx
+    mov     eax, dword ptr [rsp + L_RUN]
+    lea     eax, [rbp + rax * 2]        ; the run length: the first significant sample
+    cmp     eax, 1
+    jb      clnpass_sign0
+    je      clnpass_sign1
+    cmp     eax, 2
+    je      clnpass_sign2
+    jmp     clnpass_sign3
+clnpass_s0:
+    CLNPASS_STEP 0, clnpass_sign0, clnpass_s1
+clnpass_s1:
+    CLNPASS_STEP 1, clnpass_sign1, clnpass_s2
+clnpass_s2:
+    CLNPASS_STEP 2, clnpass_sign2, clnpass_s3
+clnpass_s3:
+    CLNPASS_STEP 3, clnpass_sign3, clnpass_store
+clnpass_store:
+    and     ebx, not ((T1_PI_THIS shl 0) or (T1_PI_THIS shl 3) or (T1_PI_THIS shl 6) or (T1_PI_THIS shl 9))
+    mov     dword ptr [rsi], ebx
+clnpass_next:
+    add     rsi, 4
+    add     rdi, 4
+    cmp     rsi, qword ptr [rsp + L_COLEND]
+    jb      clnpass_col
+    add     rsi, 8
+    add     rdi, 3 * 64 * 4
+    add     qword ptr [rsp + L_COLEND], 4 * 66
+    dec     dword ptr [rsp + L_STRIPES]
+    jnz     clnpass_col
+
+    mov     rcx, qword ptr [rsp + L_STATE]
+    mov     qword ptr [rcx + ST_BP], r11
+    mov     dword ptr [rcx + ST_A], r8d
+    mov     dword ptr [rcx + ST_C], r9d
+    mov     dword ptr [rcx + ST_CT], r10d
+
+    add     rsp, FRAME_SIZE
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rdi
+    pop     rsi
+    pop     rbp
+    pop     rbx
+    ret
+opj_t1_dec_clnpass_64x64_x64 endp
+
 end
