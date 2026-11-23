@@ -56,6 +56,16 @@
 #include <immintrin.h>
 #endif
 
+/* With MSVC for x86-64, the 9-7 lifting of whole lines is also compiled */
+/* with AVX, and used when the CPU and the OS support it, whatever the */
+/* /arch option */
+#if defined(_MSC_VER) && defined(_M_X64) && !defined(_M_ARM64EC) && \
+        defined(__SSE__)
+#define OPJ_DWT_AVX_DISPATCH
+#include <intrin.h>
+#include <immintrin.h>
+#endif
+
 #if defined(__GNUC__)
 #pragma GCC poison malloc calloc realloc free
 #endif
@@ -3500,6 +3510,127 @@ static void opj_v8dwt_decode_fused_sse(opj_v8dwt_t* OPJ_RESTRICT dwt,
 }
 #endif
 
+#ifdef OPJ_DWT_AVX_DISPATCH
+/** Whether the CPU and the OS support AVX: 0 not known yet, 1 yes, 2 no */
+static volatile int opj_dwt_avx_cpu = 0;
+
+static OPJ_BOOL opj_dwt_avx_ok(void)
+{
+    int cpu = opj_dwt_avx_cpu;
+    if (cpu == 0) {
+        int regs[4];
+        cpu = 2;
+        __cpuid(regs, 1);
+        /* ECX bit 27 OSXSAVE, bit 28 AVX, then the OS saves the */
+        /* XMM (bit 1) and YMM (bit 2) states */
+        if ((regs[2] & (1 << 27)) && (regs[2] & (1 << 28)) &&
+                (_xgetbv(0) & 6) == 6) {
+            cpu = 1;
+        }
+        opj_dwt_avx_cpu = cpu;
+    }
+    return cpu == 1;
+}
+
+#define OPJ_V8_LD(f, k) _mm256_loadu_ps((f) + 8 * (k))
+#define OPJ_V8_ST(f, k, v) _mm256_storeu_ps((f) + 8 * (k), (v))
+
+/* Same as opj_v8dwt_lift_sse(), an element being a __m256 */
+static INLINE void opj_v8dwt_lift_avx(OPJ_FLOAT32* OPJ_RESTRICT f,
+                                      OPJ_INT32 k, OPJ_INT32 n, __m256 c)
+{
+    if (k < 0 || k >= n) {
+        return;
+    }
+    if (k == 0) {
+        OPJ_V8_ST(f, 0, _mm256_add_ps(OPJ_V8_LD(f, 0),
+                                      _mm256_mul_ps(_mm256_add_ps(OPJ_V8_LD(f, 1),
+                                              OPJ_V8_LD(f, 1)), c)));
+    } else if (k == n - 1) {
+        c = _mm256_add_ps(c, c);
+        OPJ_V8_ST(f, k, _mm256_add_ps(OPJ_V8_LD(f, k),
+                                      _mm256_mul_ps(c, OPJ_V8_LD(f, k - 1))));
+    } else {
+        OPJ_V8_ST(f, k, _mm256_add_ps(OPJ_V8_LD(f, k),
+                                      _mm256_mul_ps(_mm256_add_ps(OPJ_V8_LD(f, k - 1),
+                                              OPJ_V8_LD(f, k + 1)), c)));
+    }
+}
+
+/* Same as opj_v8dwt_decode_fused_sse(), with AVX: the same operations on */
+/* the same values, so the same results */
+static void opj_v8dwt_decode_fused_avx(opj_v8dwt_t* OPJ_RESTRICT dwt,
+                                       OPJ_INT32 a)
+{
+    OPJ_FLOAT32* OPJ_RESTRICT f = dwt->wavelet[0].f;
+    const OPJ_INT32 n = dwt->sn + dwt->dn;
+    /* two_invK of opj_v8dwt_decode() */
+    const __m256 k_low = _mm256_set1_ps(opj_K);
+    const __m256 k_high = _mm256_set1_ps(1.625732422f);
+    const __m256 c_delta = _mm256_set1_ps(-opj_dwt_delta);
+    const __m256 c_gamma = _mm256_set1_ps(-opj_dwt_gamma);
+    const __m256 c_beta = _mm256_set1_ps(-opj_dwt_beta);
+    const __m256 c_alpha = _mm256_set1_ps(-opj_dwt_alpha);
+    OPJ_INT32 p = a;
+
+    if (a == 1) {
+        OPJ_V8_ST(f, 0, _mm256_mul_ps(OPJ_V8_LD(f, 0), k_high));
+    }
+    for (; p < 4 && p < n + 3; p += 2) {
+        if (p < n) {
+            OPJ_V8_ST(f, p, _mm256_mul_ps(OPJ_V8_LD(f, p), k_low));
+        }
+        if (p + 1 < n) {
+            OPJ_V8_ST(f, p + 1, _mm256_mul_ps(OPJ_V8_LD(f, p + 1), k_high));
+        }
+        opj_v8dwt_lift_avx(f, p, n, c_delta);
+        opj_v8dwt_lift_avx(f, p - 1, n, c_gamma);
+        opj_v8dwt_lift_avx(f, p - 2, n, c_beta);
+        opj_v8dwt_lift_avx(f, p - 3, n, c_alpha);
+    }
+    if (p + 2 < n) {
+        /* the elements p - 4 to p - 1, kept in registers from one */
+        /* iteration to the next */
+        __m256 xm4 = OPJ_V8_LD(f, p - 4);
+        __m256 xm3 = OPJ_V8_LD(f, p - 3);
+        __m256 xm2 = OPJ_V8_LD(f, p - 2);
+        __m256 xm1 = OPJ_V8_LD(f, p - 1);
+        for (; p + 2 < n; p += 2) {
+            __m256 x0 = _mm256_mul_ps(OPJ_V8_LD(f, p), k_low);
+            __m256 x1 = _mm256_mul_ps(OPJ_V8_LD(f, p + 1), k_high);
+            x0 = _mm256_add_ps(x0, _mm256_mul_ps(_mm256_add_ps(xm1, x1), c_delta));
+            xm1 = _mm256_add_ps(xm1, _mm256_mul_ps(_mm256_add_ps(xm2, x0), c_gamma));
+            xm2 = _mm256_add_ps(xm2, _mm256_mul_ps(_mm256_add_ps(xm3, xm1), c_beta));
+            xm3 = _mm256_add_ps(xm3, _mm256_mul_ps(_mm256_add_ps(xm4, xm2), c_alpha));
+            /* elements p - 4 and p - 3 are final */
+            OPJ_V8_ST(f, p - 4, xm4);
+            OPJ_V8_ST(f, p - 3, xm3);
+            xm4 = xm2;
+            xm3 = xm1;
+            xm2 = x0;
+            xm1 = x1;
+        }
+        OPJ_V8_ST(f, p - 4, xm4);
+        OPJ_V8_ST(f, p - 3, xm3);
+        OPJ_V8_ST(f, p - 2, xm2);
+        OPJ_V8_ST(f, p - 1, xm1);
+    }
+    for (; p < n + 3; p += 2) {
+        if (p < n) {
+            OPJ_V8_ST(f, p, _mm256_mul_ps(OPJ_V8_LD(f, p), k_low));
+        }
+        if (p + 1 < n) {
+            OPJ_V8_ST(f, p + 1, _mm256_mul_ps(OPJ_V8_LD(f, p + 1), k_high));
+        }
+        opj_v8dwt_lift_avx(f, p, n, c_delta);
+        opj_v8dwt_lift_avx(f, p - 1, n, c_gamma);
+        opj_v8dwt_lift_avx(f, p - 2, n, c_beta);
+        opj_v8dwt_lift_avx(f, p - 3, n, c_alpha);
+    }
+    _mm256_zeroupper();
+}
+#endif /* OPJ_DWT_AVX_DISPATCH */
+
 /* <summary>                             */
 /* Inverse 9-7 wavelet transform in 1-D. */
 /* </summary>                            */
@@ -3531,6 +3662,12 @@ static void opj_v8dwt_decode(opj_v8dwt_t* OPJ_RESTRICT dwt)
     if (dwt->win_l_x0 == 0 && dwt->win_l_x1 == (OPJ_UINT32)dwt->sn &&
             dwt->win_h_x0 == 0 && dwt->win_h_x1 == (OPJ_UINT32)dwt->dn &&
             dwt->sn + dwt->dn >= 8) {
+#ifdef OPJ_DWT_AVX_DISPATCH
+        if (opj_dwt_avx_ok()) {
+            opj_v8dwt_decode_fused_avx(dwt, a);
+            return;
+        }
+#endif
         opj_v8dwt_decode_fused_sse(dwt, a, two_invK);
         return;
     }
