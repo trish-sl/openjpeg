@@ -63,6 +63,8 @@
 #define T1_FLAGS(x, y) (t1->flags[x + 1 + ((y / 4) + 1) * (t1->w+2)])
 
 #define opj_t1_setcurctx(curctx, ctxno)  curctx = &(mqc)->ctxs[(OPJ_UINT32)(ctxno)]
+#define opj_t1_setcurctx_dec(curctx, ctxno) \
+    curctx = &(mqc)->dec_ctxs[(OPJ_UINT32)(ctxno)]
 
 /* Macros to deal with signed integer with just MSB bit set for
  * negative values (smr = signed magnitude representation) */
@@ -440,7 +442,7 @@ static INLINE void opj_t1_dec_sigpass_step_raw(
     if ((flags & ((T1_SIGMA_THIS | T1_PI_THIS) << (ci * 3U))) == 0U && \
         (flags & (T1_SIGMA_NEIGHBOURS << (ci * 3U))) != 0U) { \
         OPJ_UINT32 ctxt1 = opj_t1_getctxno_zc(mqc, flags >> (ci * 3U)); \
-        opj_t1_setcurctx(curctx, ctxt1); \
+        opj_t1_setcurctx_dec(curctx, ctxt1); \
         opj_mqc_decode_macro(v, mqc, curctx, a, c, ct); \
         if (v) { \
             OPJ_UINT32 lu = opj_t1_getctxtno_sc_or_spb_index( \
@@ -449,7 +451,7 @@ static INLINE void opj_t1_dec_sigpass_step_raw(
                                 ci); \
             OPJ_UINT32 ctxt2 = opj_t1_getctxno_sc(lu); \
             OPJ_UINT32 spb = opj_t1_getspb(lu); \
-            opj_t1_setcurctx(curctx, ctxt2); \
+            opj_t1_setcurctx_dec(curctx, ctxt2); \
             opj_mqc_decode_macro(v, mqc, curctx, a, c, ct); \
             v = v ^ spb; \
             data[ci*data_stride] = v ? -oneplushalf : oneplushalf; \
@@ -472,7 +474,7 @@ static INLINE void opj_t1_dec_sigpass_step_mqc(
 
     opj_mqc_t *mqc = &(t1->mqc);       /* MQC component */
     opj_t1_dec_sigpass_step_mqc_macro(*flagsp, flagsp, flags_stride, datap,
-                                      0, ci, mqc, mqc->curctx,
+                                      0, ci, mqc, mqc->dec_curctx,
                                       v, mqc->a, mqc->c, mqc->ct, oneplushalf, vsc);
 }
 
@@ -651,7 +653,7 @@ static void opj_t1_dec_sigpass_raw(
         register opj_flag_t *flagsp = &t1->flags[(flags_stride) + 1]; \
         const OPJ_UINT32 l_w = w; \
         opj_mqc_t* mqc = &(t1->mqc); \
-        DOWNLOAD_MQC_VARIABLES(mqc, curctx, a, c, ct); \
+        DOWNLOAD_MQC_DEC_VARIABLES(mqc, curctx, a, c, ct); \
         register OPJ_UINT32 v; \
         one = 1 << bpno; \
         half = one >> 1; \
@@ -676,7 +678,7 @@ static void opj_t1_dec_sigpass_raw(
                         } \
                 } \
         } \
-        UPLOAD_MQC_VARIABLES(mqc, curctx, a, c, ct); \
+        UPLOAD_MQC_DEC_VARIABLES(mqc, curctx, a, c, ct); \
         if( k < h ) { \
             for (i = 0; i < l_w; ++i, ++data, ++flagsp) { \
                 for (j = 0; j < h - k; ++j) { \
@@ -789,7 +791,7 @@ static INLINE void opj_t1_dec_refpass_step_raw(
     if ((flags & ((T1_SIGMA_THIS | T1_PI_THIS) << (ci * 3U))) == \
             (T1_SIGMA_THIS << (ci * 3U))) { \
         OPJ_UINT32 ctxt = opj_t1_getctxno_mag(flags >> (ci * 3U)); \
-        opj_t1_setcurctx(curctx, ctxt); \
+        opj_t1_setcurctx_dec(curctx, ctxt); \
         opj_mqc_decode_macro(v, mqc, curctx, a, c, ct); \
         data[ci*data_stride] += (v ^ (data[ci*data_stride] < 0)) ? poshalf : -poshalf; \
         flags |= T1_MU_THIS << (ci * 3U); \
@@ -807,7 +809,7 @@ static INLINE void opj_t1_dec_refpass_step_mqc(
 
     opj_mqc_t *mqc = &(t1->mqc);       /* MQC component */
     opj_t1_dec_refpass_step_mqc_macro(*flagsp, datap, 0, ci,
-                                      mqc, mqc->curctx, v, mqc->a, mqc->c,
+                                      mqc, mqc->dec_curctx, v, mqc->a, mqc->c,
                                       mqc->ct, poshalf);
 }
 
@@ -986,7 +988,7 @@ static void opj_t1_dec_refpass_raw(
         register opj_flag_t *flagsp = &t1->flags[flags_stride + 1]; \
         const OPJ_UINT32 l_w = w; \
         opj_mqc_t* mqc = &(t1->mqc); \
-        DOWNLOAD_MQC_VARIABLES(mqc, curctx, a, c, ct); \
+        DOWNLOAD_MQC_DEC_VARIABLES(mqc, curctx, a, c, ct); \
         register OPJ_UINT32 v; \
         one = 1 << bpno; \
         poshalf = one >> 1; \
@@ -1010,7 +1012,7 @@ static void opj_t1_dec_refpass_raw(
                         } \
                 } \
         } \
-        UPLOAD_MQC_VARIABLES(mqc, curctx, a, c, ct); \
+        UPLOAD_MQC_DEC_VARIABLES(mqc, curctx, a, c, ct); \
         if( k < h ) { \
             for (i = 0; i < l_w; ++i, ++data, ++flagsp) { \
                 for (j = 0; j < h - k; ++j) { \
@@ -1124,7 +1126,7 @@ Encode clean-up pass step
         do { \
             if( !partial ) { \
                 OPJ_UINT32 ctxt1 = opj_t1_getctxno_zc(mqc, flags >> (ci * 3U)); \
-                opj_t1_setcurctx(curctx, ctxt1); \
+                opj_t1_setcurctx_dec(curctx, ctxt1); \
                 opj_mqc_decode_macro(v, mqc, curctx, a, c, ct); \
                 if( !v ) \
                     break; \
@@ -1133,7 +1135,7 @@ Encode clean-up pass step
                 OPJ_UINT32 lu = opj_t1_getctxtno_sc_or_spb_index( \
                                     flags, flagsp[-1], flagsp[1], \
                                     ci); \
-                opj_t1_setcurctx(curctx, opj_t1_getctxno_sc(lu)); \
+                opj_t1_setcurctx_dec(curctx, opj_t1_getctxno_sc(lu)); \
                 opj_mqc_decode_macro(v, mqc, curctx, a, c, ct); \
                 v = v ^ opj_t1_getspb(lu); \
                 data[ci*data_stride] = v ? -oneplushalf : oneplushalf; \
@@ -1156,7 +1158,7 @@ static void opj_t1_dec_clnpass_step(
     opj_mqc_t *mqc = &(t1->mqc);   /* MQC component */
     opj_t1_dec_clnpass_step_macro(OPJ_TRUE, OPJ_FALSE,
                                   *flagsp, flagsp, t1->w + 2U, datap,
-                                  0, ci, mqc, mqc->curctx,
+                                  0, ci, mqc, mqc->dec_curctx,
                                   v, mqc->a, mqc->c, mqc->ct, oneplushalf, vsc);
 }
 
@@ -1260,7 +1262,7 @@ static void opj_t1_enc_clnpass(
     opj_mqc_t* mqc = &(t1->mqc); \
     register OPJ_INT32 *data = t1->data; \
     register opj_flag_t *flagsp = &t1->flags[flags_stride + 1]; \
-    DOWNLOAD_MQC_VARIABLES(mqc, curctx, a, c, ct); \
+    DOWNLOAD_MQC_DEC_VARIABLES(mqc, curctx, a, c, ct); \
     register OPJ_UINT32 v; \
     one = 1 << bpno; \
     half = one >> 1; \
@@ -1270,12 +1272,12 @@ static void opj_t1_enc_clnpass(
             opj_flag_t flags = *flagsp; \
             if (flags == 0) { \
                 OPJ_UINT32 partial = OPJ_TRUE; \
-                opj_t1_setcurctx(curctx, T1_CTXNO_AGG); \
+                opj_t1_setcurctx_dec(curctx, T1_CTXNO_AGG); \
                 opj_mqc_decode_macro(v, mqc, curctx, a, c, ct); \
                 if (!v) { \
                     continue; \
                 } \
-                opj_t1_setcurctx(curctx, T1_CTXNO_UNI); \
+                opj_t1_setcurctx_dec(curctx, T1_CTXNO_UNI); \
                 opj_mqc_decode_macro(runlen, mqc, curctx, a, c, ct); \
                 opj_mqc_decode_macro(v, mqc, curctx, a, c, ct); \
                 runlen = (runlen << 1) | v; \
@@ -1329,7 +1331,7 @@ static void opj_t1_enc_clnpass(
             *flagsp = flags & ~(T1_PI_0 | T1_PI_1 | T1_PI_2 | T1_PI_3); \
         } \
     } \
-    UPLOAD_MQC_VARIABLES(mqc, curctx, a, c, ct); \
+    UPLOAD_MQC_DEC_VARIABLES(mqc, curctx, a, c, ct); \
     if( k < h ) { \
         for (i = 0; i < l_w; ++i, ++flagsp, ++data) { \
             for (j = 0; j < h - k; ++j) { \
@@ -1345,7 +1347,7 @@ static void opj_t1_dec_clnpass_check_segsym(opj_t1_t *t1, OPJ_INT32 cblksty)
     if (cblksty & J2K_CCP_CBLKSTY_SEGSYM) {
         opj_mqc_t* mqc = &(t1->mqc);
         OPJ_UINT32 v, v2;
-        opj_mqc_setcurctx(mqc, T1_CTXNO_UNI);
+        opj_mqc_setcurctx_dec(mqc, T1_CTXNO_UNI);
         opj_mqc_decode(v, mqc);
         opj_mqc_decode(v2, mqc);
         v = (v << 1) | v2;
@@ -2150,14 +2152,17 @@ static OPJ_BOOL opj_t1_decode_cblk(opj_t1_t *t1,
     }
 
     if (check_pterm) {
-        if (mqc->bp + 2 < mqc->end) {
+        /* Bytes read ahead by opj_mqc_bytein_ahead_macro() are not */
+        /* counted as used */
+        const OPJ_BYTE* bp = mqc->bp - (mqc->ct >> 3);
+        if (bp + 2 < mqc->end) {
             if (p_manager_mutex) {
                 opj_mutex_lock(p_manager_mutex);
             }
             opj_event_msg(p_manager, EVT_WARNING,
                           "PTERM check failure: %d remaining bytes in code block (%d used / %d)\n",
-                          (int)(mqc->end - mqc->bp) - 2,
-                          (int)(mqc->bp - mqc->start),
+                          (int)(mqc->end - bp) - 2,
+                          (int)(bp - mqc->start),
                           (int)(mqc->end - mqc->start));
             if (p_manager_mutex) {
                 opj_mutex_unlock(p_manager_mutex);

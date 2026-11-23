@@ -155,6 +155,122 @@ static const opj_mqc_state_t mqc_states[47 * 2] = {
     {0x5601, 1, &mqc_states[93], &mqc_states[93]},
 };
 
+/* The transitions of mqc_states[] for the decoder, whose context states */
+/* are packed in a word, see opj_mqc_t::dec_ctxs: for each state, the next */
+/* state after a MPS (nmps), then the next state after a LPS (nlps). */
+/* OPJ_MQC_DS(qeval, number of left shifts that renormalize qeval, index in */
+/* mqc_states) */
+#define OPJ_MQC_DS(qeval, nshift, index) \
+    (((OPJ_UINT32)(qeval) << 16) | ((nshift) << 8) | ((index) << 1))
+static const OPJ_UINT32 mqc_dec_trans[47 * 2 * 2] = {
+    OPJ_MQC_DS(0x3401, 2, 2), OPJ_MQC_DS(0x3401, 2, 3),
+    OPJ_MQC_DS(0x3401, 2, 3), OPJ_MQC_DS(0x3401, 2, 2),
+    OPJ_MQC_DS(0x1801, 3, 4), OPJ_MQC_DS(0x5601, 1, 12),
+    OPJ_MQC_DS(0x1801, 3, 5), OPJ_MQC_DS(0x5601, 1, 13),
+    OPJ_MQC_DS(0x0ac1, 4, 6), OPJ_MQC_DS(0x3801, 2, 18),
+    OPJ_MQC_DS(0x0ac1, 4, 7), OPJ_MQC_DS(0x3801, 2, 19),
+    OPJ_MQC_DS(0x0521, 5, 8), OPJ_MQC_DS(0x1c01, 3, 24),
+    OPJ_MQC_DS(0x0521, 5, 9), OPJ_MQC_DS(0x1c01, 3, 25),
+    OPJ_MQC_DS(0x0221, 6, 10), OPJ_MQC_DS(0x1101, 3, 58),
+    OPJ_MQC_DS(0x0221, 6, 11), OPJ_MQC_DS(0x1101, 3, 59),
+    OPJ_MQC_DS(0x0111, 7, 76), OPJ_MQC_DS(0x0521, 5, 66),
+    OPJ_MQC_DS(0x0111, 7, 77), OPJ_MQC_DS(0x0521, 5, 67),
+    OPJ_MQC_DS(0x5401, 1, 14), OPJ_MQC_DS(0x5601, 1, 13),
+    OPJ_MQC_DS(0x5401, 1, 15), OPJ_MQC_DS(0x5601, 1, 12),
+    OPJ_MQC_DS(0x4801, 1, 16), OPJ_MQC_DS(0x5601, 1, 28),
+    OPJ_MQC_DS(0x4801, 1, 17), OPJ_MQC_DS(0x5601, 1, 29),
+    OPJ_MQC_DS(0x3801, 2, 18), OPJ_MQC_DS(0x5601, 1, 28),
+    OPJ_MQC_DS(0x3801, 2, 19), OPJ_MQC_DS(0x5601, 1, 29),
+    OPJ_MQC_DS(0x3001, 2, 20), OPJ_MQC_DS(0x5601, 1, 28),
+    OPJ_MQC_DS(0x3001, 2, 21), OPJ_MQC_DS(0x5601, 1, 29),
+    OPJ_MQC_DS(0x2401, 2, 22), OPJ_MQC_DS(0x4801, 1, 34),
+    OPJ_MQC_DS(0x2401, 2, 23), OPJ_MQC_DS(0x4801, 1, 35),
+    OPJ_MQC_DS(0x1c01, 3, 24), OPJ_MQC_DS(0x3801, 2, 36),
+    OPJ_MQC_DS(0x1c01, 3, 25), OPJ_MQC_DS(0x3801, 2, 37),
+    OPJ_MQC_DS(0x1601, 3, 26), OPJ_MQC_DS(0x3001, 2, 40),
+    OPJ_MQC_DS(0x1601, 3, 27), OPJ_MQC_DS(0x3001, 2, 41),
+    OPJ_MQC_DS(0x1101, 3, 58), OPJ_MQC_DS(0x2801, 2, 42),
+    OPJ_MQC_DS(0x1101, 3, 59), OPJ_MQC_DS(0x2801, 2, 43),
+    OPJ_MQC_DS(0x5401, 1, 30), OPJ_MQC_DS(0x5601, 1, 29),
+    OPJ_MQC_DS(0x5401, 1, 31), OPJ_MQC_DS(0x5601, 1, 28),
+    OPJ_MQC_DS(0x5101, 1, 32), OPJ_MQC_DS(0x5601, 1, 28),
+    OPJ_MQC_DS(0x5101, 1, 33), OPJ_MQC_DS(0x5601, 1, 29),
+    OPJ_MQC_DS(0x4801, 1, 34), OPJ_MQC_DS(0x5401, 1, 30),
+    OPJ_MQC_DS(0x4801, 1, 35), OPJ_MQC_DS(0x5401, 1, 31),
+    OPJ_MQC_DS(0x3801, 2, 36), OPJ_MQC_DS(0x5101, 1, 32),
+    OPJ_MQC_DS(0x3801, 2, 37), OPJ_MQC_DS(0x5101, 1, 33),
+    OPJ_MQC_DS(0x3401, 2, 38), OPJ_MQC_DS(0x4801, 1, 34),
+    OPJ_MQC_DS(0x3401, 2, 39), OPJ_MQC_DS(0x4801, 1, 35),
+    OPJ_MQC_DS(0x3001, 2, 40), OPJ_MQC_DS(0x3801, 2, 36),
+    OPJ_MQC_DS(0x3001, 2, 41), OPJ_MQC_DS(0x3801, 2, 37),
+    OPJ_MQC_DS(0x2801, 2, 42), OPJ_MQC_DS(0x3401, 2, 38),
+    OPJ_MQC_DS(0x2801, 2, 43), OPJ_MQC_DS(0x3401, 2, 39),
+    OPJ_MQC_DS(0x2401, 2, 44), OPJ_MQC_DS(0x3401, 2, 38),
+    OPJ_MQC_DS(0x2401, 2, 45), OPJ_MQC_DS(0x3401, 2, 39),
+    OPJ_MQC_DS(0x2201, 2, 46), OPJ_MQC_DS(0x3001, 2, 40),
+    OPJ_MQC_DS(0x2201, 2, 47), OPJ_MQC_DS(0x3001, 2, 41),
+    OPJ_MQC_DS(0x1c01, 3, 48), OPJ_MQC_DS(0x2801, 2, 42),
+    OPJ_MQC_DS(0x1c01, 3, 49), OPJ_MQC_DS(0x2801, 2, 43),
+    OPJ_MQC_DS(0x1801, 3, 50), OPJ_MQC_DS(0x2401, 2, 44),
+    OPJ_MQC_DS(0x1801, 3, 51), OPJ_MQC_DS(0x2401, 2, 45),
+    OPJ_MQC_DS(0x1601, 3, 52), OPJ_MQC_DS(0x2201, 2, 46),
+    OPJ_MQC_DS(0x1601, 3, 53), OPJ_MQC_DS(0x2201, 2, 47),
+    OPJ_MQC_DS(0x1401, 3, 54), OPJ_MQC_DS(0x1c01, 3, 48),
+    OPJ_MQC_DS(0x1401, 3, 55), OPJ_MQC_DS(0x1c01, 3, 49),
+    OPJ_MQC_DS(0x1201, 3, 56), OPJ_MQC_DS(0x1801, 3, 50),
+    OPJ_MQC_DS(0x1201, 3, 57), OPJ_MQC_DS(0x1801, 3, 51),
+    OPJ_MQC_DS(0x1101, 3, 58), OPJ_MQC_DS(0x1601, 3, 52),
+    OPJ_MQC_DS(0x1101, 3, 59), OPJ_MQC_DS(0x1601, 3, 53),
+    OPJ_MQC_DS(0x0ac1, 4, 60), OPJ_MQC_DS(0x1401, 3, 54),
+    OPJ_MQC_DS(0x0ac1, 4, 61), OPJ_MQC_DS(0x1401, 3, 55),
+    OPJ_MQC_DS(0x09c1, 4, 62), OPJ_MQC_DS(0x1201, 3, 56),
+    OPJ_MQC_DS(0x09c1, 4, 63), OPJ_MQC_DS(0x1201, 3, 57),
+    OPJ_MQC_DS(0x08a1, 4, 64), OPJ_MQC_DS(0x1101, 3, 58),
+    OPJ_MQC_DS(0x08a1, 4, 65), OPJ_MQC_DS(0x1101, 3, 59),
+    OPJ_MQC_DS(0x0521, 5, 66), OPJ_MQC_DS(0x0ac1, 4, 60),
+    OPJ_MQC_DS(0x0521, 5, 67), OPJ_MQC_DS(0x0ac1, 4, 61),
+    OPJ_MQC_DS(0x0441, 5, 68), OPJ_MQC_DS(0x09c1, 4, 62),
+    OPJ_MQC_DS(0x0441, 5, 69), OPJ_MQC_DS(0x09c1, 4, 63),
+    OPJ_MQC_DS(0x02a1, 6, 70), OPJ_MQC_DS(0x08a1, 4, 64),
+    OPJ_MQC_DS(0x02a1, 6, 71), OPJ_MQC_DS(0x08a1, 4, 65),
+    OPJ_MQC_DS(0x0221, 6, 72), OPJ_MQC_DS(0x0521, 5, 66),
+    OPJ_MQC_DS(0x0221, 6, 73), OPJ_MQC_DS(0x0521, 5, 67),
+    OPJ_MQC_DS(0x0141, 7, 74), OPJ_MQC_DS(0x0441, 5, 68),
+    OPJ_MQC_DS(0x0141, 7, 75), OPJ_MQC_DS(0x0441, 5, 69),
+    OPJ_MQC_DS(0x0111, 7, 76), OPJ_MQC_DS(0x02a1, 6, 70),
+    OPJ_MQC_DS(0x0111, 7, 77), OPJ_MQC_DS(0x02a1, 6, 71),
+    OPJ_MQC_DS(0x0085, 8, 78), OPJ_MQC_DS(0x0221, 6, 72),
+    OPJ_MQC_DS(0x0085, 8, 79), OPJ_MQC_DS(0x0221, 6, 73),
+    OPJ_MQC_DS(0x0049, 9, 80), OPJ_MQC_DS(0x0141, 7, 74),
+    OPJ_MQC_DS(0x0049, 9, 81), OPJ_MQC_DS(0x0141, 7, 75),
+    OPJ_MQC_DS(0x0025, 10, 82), OPJ_MQC_DS(0x0111, 7, 76),
+    OPJ_MQC_DS(0x0025, 10, 83), OPJ_MQC_DS(0x0111, 7, 77),
+    OPJ_MQC_DS(0x0015, 11, 84), OPJ_MQC_DS(0x0085, 8, 78),
+    OPJ_MQC_DS(0x0015, 11, 85), OPJ_MQC_DS(0x0085, 8, 79),
+    OPJ_MQC_DS(0x0009, 12, 86), OPJ_MQC_DS(0x0049, 9, 80),
+    OPJ_MQC_DS(0x0009, 12, 87), OPJ_MQC_DS(0x0049, 9, 81),
+    OPJ_MQC_DS(0x0005, 13, 88), OPJ_MQC_DS(0x0025, 10, 82),
+    OPJ_MQC_DS(0x0005, 13, 89), OPJ_MQC_DS(0x0025, 10, 83),
+    OPJ_MQC_DS(0x0001, 15, 90), OPJ_MQC_DS(0x0015, 11, 84),
+    OPJ_MQC_DS(0x0001, 15, 91), OPJ_MQC_DS(0x0015, 11, 85),
+    OPJ_MQC_DS(0x0001, 15, 90), OPJ_MQC_DS(0x0009, 12, 86),
+    OPJ_MQC_DS(0x0001, 15, 91), OPJ_MQC_DS(0x0009, 12, 87),
+    OPJ_MQC_DS(0x5601, 1, 92), OPJ_MQC_DS(0x5601, 1, 92),
+    OPJ_MQC_DS(0x5601, 1, 93), OPJ_MQC_DS(0x5601, 1, 93),
+};
+
+/* Packed decoder state of mqc_states[i], see opj_mqc_t::dec_ctxs */
+static OPJ_UINT32 opj_mqc_dec_state(OPJ_UINT32 i)
+{
+    OPJ_UINT32 qeval = mqc_states[i].qeval;
+    OPJ_UINT32 nshift = 0;
+    while ((qeval << nshift) < 0x8000) {
+        nshift++;
+    }
+    return OPJ_MQC_DS(qeval, nshift, i);
+}
+#undef OPJ_MQC_DS
+
 /*
 ==========================================================
    local functions
@@ -446,6 +562,8 @@ void opj_mqc_init_dec(opj_mqc_t *mqc, OPJ_BYTE *bp, OPJ_UINT32 len,
     /* See https://github.com/uclouvain/openjpeg/issues/921 */
     opj_mqc_init_dec_common(mqc, bp, len, extra_writable_bytes);
     opj_mqc_setcurctx(mqc, 0);
+    mqc->dec_curctx = &mqc->dec_ctxs[0];
+    mqc->dec_trans = mqc_dec_trans;
     mqc->end_of_byte_stream_counter = 0;
     if (len == 0) {
         mqc->c = 0xff << 16;
@@ -478,8 +596,10 @@ void opq_mqc_finish_dec(opj_mqc_t *mqc)
 void opj_mqc_resetstates(opj_mqc_t *mqc)
 {
     OPJ_UINT32 i;
+    const OPJ_UINT32 dec_state = opj_mqc_dec_state(0);
     for (i = 0; i < MQC_NUMCTXS; i++) {
         mqc->ctxs[i] = mqc_states;
+        mqc->dec_ctxs[i] = dec_state;
     }
 }
 
@@ -487,6 +607,7 @@ void opj_mqc_setstate(opj_mqc_t *mqc, OPJ_UINT32 ctxno, OPJ_UINT32 msb,
                       OPJ_INT32 prob)
 {
     mqc->ctxs[ctxno] = &mqc_states[msb + (OPJ_UINT32)(prob << 1)];
+    mqc->dec_ctxs[ctxno] = opj_mqc_dec_state(msb + (OPJ_UINT32)(prob << 1));
 }
 
 void opj_mqc_byteout(opj_mqc_t *mqc)
