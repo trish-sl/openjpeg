@@ -117,6 +117,17 @@ static OPJ_BOOL opj_dwt_avx_ok(void)
 /** Number of columns that we can process in parallel in the vertical pass */
 #define PARALLEL_COLS_53     (2*VREG_INT_COUNT)
 
+/* With MSVC for x86-64 and SSE2 only, the vertical 5-3 pass also works on */
+/* 16 columns at a time, so that whole cache lines are read and written */
+#if defined(_MSC_VER) && defined(_M_X64) && !defined(_M_ARM64EC) && \
+        !defined(__AVX2__) && !defined(__AVX512F__)
+#define OPJ_IDWT53_V_16COLS_SSE2
+/** Number of columns done at a time by the vertical pass */
+#define OPJ_IDWT53_V_COLS    16
+#else
+#define OPJ_IDWT53_V_COLS    PARALLEL_COLS_53
+#endif
+
 /** @name Local data structures */
 /*@{*/
 
@@ -1013,6 +1024,192 @@ static void opj_idwt53_v_cas1_mcols_SIMD(
     opj_idwt53_v_final_memcpy(tiledp_col, tmp, len, stride);
 }
 
+#ifdef OPJ_IDWT53_V_16COLS_SSE2
+/* With SSE2 only, the vertical 5-3 pass works on 16 columns at a time, */
+/* 4 registers per row: whole 64 bytes cache lines of the tile are then */
+/* read and written, instead of halves that are read again later, once */
+/* the line has likely been evicted. Same operations as */
+/* opj_idwt53_v_cas0_mcols_SSE2_OR_AVX2() and */
+/* opj_idwt53_v_cas1_mcols_SSE2_OR_AVX2(), so the same results. */
+
+static void opj_idwt53_v_final_memcpy_16cols(OPJ_INT32* tiledp_col,
+        const OPJ_INT32* tmp,
+        OPJ_INT32 len,
+        OPJ_SIZE_T stride)
+{
+    OPJ_INT32 i;
+    for (i = 0; i < len; ++i) {
+        OPJ_INT32* dst = &tiledp_col[(OPJ_SIZE_T)i * stride];
+        const OPJ_INT32* src = &tmp[OPJ_IDWT53_V_COLS * i];
+        STOREU(dst + 0, LOAD(src + 0));
+        STOREU(dst + 4, LOAD(src + 4));
+        STOREU(dst + 8, LOAD(src + 8));
+        STOREU(dst + 12, LOAD(src + 12));
+    }
+}
+
+/** Vertical inverse 5x3 wavelet transform for 16 columns in SSE2, when */
+/* top-most pixel is on even coordinate */
+static void opj_idwt53_v_cas0_16cols_SSE2(
+    OPJ_INT32* tmp,
+    const OPJ_INT32 sn,
+    const OPJ_INT32 len,
+    OPJ_INT32* tiledp_col,
+    const OPJ_SIZE_T stride)
+{
+    const OPJ_INT32* in_even = &tiledp_col[0];
+    const OPJ_INT32* in_odd = &tiledp_col[(OPJ_SIZE_T)sn * stride];
+
+    OPJ_INT32 i, c;
+    OPJ_SIZE_T j;
+    VREG d1n_0, s0n_0, d1n_1, s0n_1, d1n_2, s0n_2, d1n_3, s0n_3;
+    const VREG two = LOAD_CST(2);
+
+    assert(len > 1);
+    assert(VREG_INT_COUNT == 4);
+    /* Note: loads of input even/odd values must be done in a unaligned */
+    /* fashion. But stores in tmp can be done with aligned store, since */
+    /* the temporary buffer is properly aligned */
+    assert((OPJ_SIZE_T)tmp % (sizeof(OPJ_INT32) * VREG_INT_COUNT) == 0);
+
+    d1n_0 = LOADU(in_odd);
+    d1n_1 = LOADU(in_odd + 4);
+    d1n_2 = LOADU(in_odd + 8);
+    d1n_3 = LOADU(in_odd + 12);
+
+    /* s0n = s1n - ((d1n + 1) >> 1); <==> */
+    /* s0n = s1n - ((d1n + d1n + 2) >> 2); */
+    s0n_0 = SUB(LOADU(in_even + 0), SAR(ADD3(d1n_0, d1n_0, two), 2));
+    s0n_1 = SUB(LOADU(in_even + 4), SAR(ADD3(d1n_1, d1n_1, two), 2));
+    s0n_2 = SUB(LOADU(in_even + 8), SAR(ADD3(d1n_2, d1n_2, two), 2));
+    s0n_3 = SUB(LOADU(in_even + 12), SAR(ADD3(d1n_3, d1n_3, two), 2));
+
+#define OPJ_IDWT53_CAS0_STEP(k) \
+    do { \
+        const VREG d1c = d1n_##k; \
+        const VREG s0c = s0n_##k; \
+        d1n_##k = LOADU(in_odd + j * stride + 4 * k); \
+        /*s0n = s1n - ((d1c + d1n + 2) >> 2);*/ \
+        s0n_##k = SUB(LOADU(in_even + j * stride + 4 * k), \
+                      SAR(ADD3(d1c, d1n_##k, two), 2)); \
+        STORE(tmp + OPJ_IDWT53_V_COLS * (i + 0) + 4 * k, s0c); \
+        /* d1c + ((s0c + s0n) >> 1) */ \
+        STORE(tmp + OPJ_IDWT53_V_COLS * (i + 1) + 4 * k, \
+              ADD(d1c, SAR(ADD(s0c, s0n_##k), 1))); \
+    } while (0)
+
+    for (i = 0, j = 1; i < (len - 3); i += 2, j++) {
+        OPJ_IDWT53_CAS0_STEP(0);
+        OPJ_IDWT53_CAS0_STEP(1);
+        OPJ_IDWT53_CAS0_STEP(2);
+        OPJ_IDWT53_CAS0_STEP(3);
+    }
+#undef OPJ_IDWT53_CAS0_STEP
+
+    STORE(tmp + OPJ_IDWT53_V_COLS * i + 0, s0n_0);
+    STORE(tmp + OPJ_IDWT53_V_COLS * i + 4, s0n_1);
+    STORE(tmp + OPJ_IDWT53_V_COLS * i + 8, s0n_2);
+    STORE(tmp + OPJ_IDWT53_V_COLS * i + 12, s0n_3);
+
+    for (c = 0; c < 4; c++) {
+        const VREG d1n = c == 0 ? d1n_0 : c == 1 ? d1n_1 : c == 2 ? d1n_2 : d1n_3;
+        const VREG s0n = c == 0 ? s0n_0 : c == 1 ? s0n_1 : c == 2 ? s0n_2 : s0n_3;
+        if (len & 1) {
+            /* tmp_len_minus_1 = s1n - ((d1n + 1) >> 1); */
+            const VREG tmp_len_minus_1 =
+                SUB(LOADU(in_even + (OPJ_SIZE_T)((len - 1) / 2) * stride + 4 * c),
+                    SAR(ADD3(d1n, d1n, two), 2));
+            STORE(tmp + OPJ_IDWT53_V_COLS * (len - 1) + 4 * c, tmp_len_minus_1);
+            /* d1n + ((s0n + tmp_len_minus_1) >> 1) */
+            STORE(tmp + OPJ_IDWT53_V_COLS * (len - 2) + 4 * c,
+                  ADD(d1n, SAR(ADD(s0n, tmp_len_minus_1), 1)));
+        } else {
+            STORE(tmp + OPJ_IDWT53_V_COLS * (len - 1) + 4 * c, ADD(d1n, s0n));
+        }
+    }
+
+    opj_idwt53_v_final_memcpy_16cols(tiledp_col, tmp, len, stride);
+}
+
+/** Vertical inverse 5x3 wavelet transform for 16 columns in SSE2, when */
+/* top-most pixel is on odd coordinate */
+static void opj_idwt53_v_cas1_16cols_SSE2(
+    OPJ_INT32* tmp,
+    const OPJ_INT32 sn,
+    const OPJ_INT32 len,
+    OPJ_INT32* tiledp_col,
+    const OPJ_SIZE_T stride)
+{
+    OPJ_INT32 i, c;
+    OPJ_SIZE_T j;
+    VREG s1_0, dc_0, s1_1, dc_1, s1_2, dc_2, s1_3, dc_3;
+    const VREG two = LOAD_CST(2);
+
+    const OPJ_INT32* in_even = &tiledp_col[(OPJ_SIZE_T)sn * stride];
+    const OPJ_INT32* in_odd = &tiledp_col[0];
+
+    assert(len > 2);
+    assert(VREG_INT_COUNT == 4);
+    assert((OPJ_SIZE_T)tmp % (sizeof(OPJ_INT32) * VREG_INT_COUNT) == 0);
+
+#define OPJ_IDWT53_CAS1_FIRST(k) \
+    do { \
+        const VREG e0 = LOADU(in_even + 4 * k); \
+        s1_##k = LOADU(in_even + stride + 4 * k); \
+        /* in_odd[0] - ((in_even[0] + s1 + 2) >> 2); */ \
+        dc_##k = SUB(LOADU(in_odd + 4 * k), SAR(ADD3(e0, s1_##k, two), 2)); \
+        STORE(tmp + OPJ_IDWT53_V_COLS * 0 + 4 * k, ADD(e0, dc_##k)); \
+    } while (0)
+    OPJ_IDWT53_CAS1_FIRST(0);
+    OPJ_IDWT53_CAS1_FIRST(1);
+    OPJ_IDWT53_CAS1_FIRST(2);
+    OPJ_IDWT53_CAS1_FIRST(3);
+#undef OPJ_IDWT53_CAS1_FIRST
+
+#define OPJ_IDWT53_CAS1_STEP(k) \
+    do { \
+        const VREG s2 = LOADU(in_even + (j + 1) * stride + 4 * k); \
+        /* dn = in_odd[j * stride] - ((s1 + s2 + 2) >> 2); */ \
+        const VREG dn = SUB(LOADU(in_odd + j * stride + 4 * k), \
+                            SAR(ADD3(s1_##k, s2, two), 2)); \
+        STORE(tmp + OPJ_IDWT53_V_COLS * i + 4 * k, dc_##k); \
+        /* tmp[i + 1] = s1 + ((dn + dc) >> 1); */ \
+        STORE(tmp + OPJ_IDWT53_V_COLS * (i + 1) + 4 * k, \
+              ADD(s1_##k, SAR(ADD(dn, dc_##k), 1))); \
+        dc_##k = dn; \
+        s1_##k = s2; \
+    } while (0)
+
+    for (i = 1, j = 1; i < (len - 2 - !(len & 1)); i += 2, j++) {
+        OPJ_IDWT53_CAS1_STEP(0);
+        OPJ_IDWT53_CAS1_STEP(1);
+        OPJ_IDWT53_CAS1_STEP(2);
+        OPJ_IDWT53_CAS1_STEP(3);
+    }
+#undef OPJ_IDWT53_CAS1_STEP
+
+    for (c = 0; c < 4; c++) {
+        const VREG s1 = c == 0 ? s1_0 : c == 1 ? s1_1 : c == 2 ? s1_2 : s1_3;
+        const VREG dc = c == 0 ? dc_0 : c == 1 ? dc_1 : c == 2 ? dc_2 : dc_3;
+        STORE(tmp + OPJ_IDWT53_V_COLS * i + 4 * c, dc);
+        if (!(len & 1)) {
+            /*dn = in_odd[(len / 2 - 1) * stride] - ((s1 + 1) >> 1); */
+            const VREG dn = SUB(LOADU(in_odd + (OPJ_SIZE_T)(len / 2 - 1) * stride +
+                                      4 * c),
+                                SAR(ADD3(s1, s1, two), 2));
+            /* tmp[len - 2] = s1 + ((dn + dc) >> 1); */
+            STORE(tmp + OPJ_IDWT53_V_COLS * (len - 2) + 4 * c,
+                  ADD(s1, SAR(ADD(dn, dc), 1)));
+            STORE(tmp + OPJ_IDWT53_V_COLS * (len - 1) + 4 * c, dn);
+        } else {
+            STORE(tmp + OPJ_IDWT53_V_COLS * (len - 1) + 4 * c, ADD(s1, dc));
+        }
+    }
+
+    opj_idwt53_v_final_memcpy_16cols(tiledp_col, tmp, len, stride);
+}
+#endif /* OPJ_IDWT53_V_16COLS_SSE2 */
+
 #undef VREG
 #undef LOAD_CST
 #undef LOADU
@@ -1151,6 +1348,12 @@ static void opj_idwt53_v(const opj_dwt_t *dwt,
     if (dwt->cas == 0) {
         /* If len == 1, unmodified value */
 
+#ifdef OPJ_IDWT53_V_16COLS_SSE2
+        if (len > 1 && nb_cols == OPJ_IDWT53_V_COLS) {
+            opj_idwt53_v_cas0_16cols_SSE2(dwt->mem, sn, len, tiledp_col, stride);
+            return;
+        }
+#endif
 #if (defined(__ARM_NEON) || defined(__SSE2__) || defined(__AVX2__))
         if (len > 1 && nb_cols == PARALLEL_COLS_53) {
             /* Same as below general case, except that thanks to SIMD */
@@ -1194,6 +1397,12 @@ static void opj_idwt53_v(const opj_dwt_t *dwt,
             return;
         }
 
+#ifdef OPJ_IDWT53_V_16COLS_SSE2
+        if (len > 2 && nb_cols == OPJ_IDWT53_V_COLS) {
+            opj_idwt53_v_cas1_16cols_SSE2(dwt->mem, sn, len, tiledp_col, stride);
+            return;
+        }
+#endif
 #if (defined(__ARM_NEON) || defined(__SSE2__) || defined(__AVX2__))
         if (len > 2 && nb_cols == PARALLEL_COLS_53) {
             /* Same as below general case, except that thanks to SIMD */
@@ -2304,11 +2513,18 @@ static void opj_dwt_decode_v_func(void* user_data, opj_tls_t* tls)
     (void)tls;
 
     job = (opj_dwt_decode_v_job_t*)user_data;
-    for (j = job->min_j; j + PARALLEL_COLS_53 <= job->max_j;
-            j += PARALLEL_COLS_53) {
+    for (j = job->min_j; j + OPJ_IDWT53_V_COLS <= job->max_j;
+            j += OPJ_IDWT53_V_COLS) {
+        opj_idwt53_v(&job->v, &job->tiledp[j], (OPJ_SIZE_T)job->w,
+                     OPJ_IDWT53_V_COLS);
+    }
+#ifdef OPJ_IDWT53_V_16COLS_SSE2
+    if (j + PARALLEL_COLS_53 <= job->max_j) {
         opj_idwt53_v(&job->v, &job->tiledp[j], (OPJ_SIZE_T)job->w,
                      PARALLEL_COLS_53);
+        j += PARALLEL_COLS_53;
     }
+#endif
     if (j < job->max_j)
         opj_idwt53_v(&job->v, &job->tiledp[j], (OPJ_SIZE_T)job->w,
                      (OPJ_INT32)(job->max_j - j));
@@ -2348,14 +2564,14 @@ static OPJ_BOOL opj_dwt_decode_tile(opj_thread_pool_t* tp,
     num_threads = opj_thread_pool_get_thread_count(tp);
     h_mem_size = opj_dwt_max_resolution(tr, numres);
     /* overflow check */
-    if (h_mem_size > (SIZE_MAX / PARALLEL_COLS_53 / sizeof(OPJ_INT32))) {
+    if (h_mem_size > (SIZE_MAX / OPJ_IDWT53_V_COLS / sizeof(OPJ_INT32))) {
         /* FIXME event manager error callback */
         return OPJ_FALSE;
     }
     /* We need PARALLEL_COLS_53 times the height of the array, */
     /* since for the vertical pass */
     /* we process PARALLEL_COLS_53 columns at a time */
-    h_mem_size *= PARALLEL_COLS_53 * sizeof(OPJ_INT32);
+    h_mem_size *= OPJ_IDWT53_V_COLS * sizeof(OPJ_INT32);
     h.mem = (OPJ_INT32*)opj_aligned_32_malloc(h_mem_size);
     if (! h.mem) {
         /* FIXME event manager error callback */
@@ -2430,10 +2646,16 @@ static OPJ_BOOL opj_dwt_decode_tile(opj_thread_pool_t* tp,
         v.cas = tr->y0 % 2;
 
         if (num_threads <= 1 || rw <= 1) {
-            for (j = 0; j + PARALLEL_COLS_53 <= rw;
-                    j += PARALLEL_COLS_53) {
-                opj_idwt53_v(&v, &tiledp[j], (OPJ_SIZE_T)w, PARALLEL_COLS_53);
+            for (j = 0; j + OPJ_IDWT53_V_COLS <= rw;
+                    j += OPJ_IDWT53_V_COLS) {
+                opj_idwt53_v(&v, &tiledp[j], (OPJ_SIZE_T)w, OPJ_IDWT53_V_COLS);
             }
+#ifdef OPJ_IDWT53_V_16COLS_SSE2
+            if (j + PARALLEL_COLS_53 <= rw) {
+                opj_idwt53_v(&v, &tiledp[j], (OPJ_SIZE_T)w, PARALLEL_COLS_53);
+                j += PARALLEL_COLS_53;
+            }
+#endif
             if (j < rw) {
                 opj_idwt53_v(&v, &tiledp[j], (OPJ_SIZE_T)w, (OPJ_INT32)(rw - j));
             }
