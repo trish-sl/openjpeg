@@ -171,6 +171,114 @@ fast:
 done:
 endm
 
+; Shifts a and c left by edx bits, as opj_mqc_renormd_n_macro()
+; clobbers eax, ecx, edx
+MQ_RENORM_N macro
+    local fast, ahead, ahead_done, slow_loop, nobyte, b_normal, b_stuff, done
+    cmp     r10d, edx
+    jae     fast
+ahead:
+    cmp     r10d, 8
+    ja      ahead_done
+    cmp     byte ptr [r11], 0FFh
+    je      ahead_done
+    inc     r11
+    movzx   eax, byte ptr [r11]
+    mov     ecx, 8
+    sub     ecx, r10d
+    shlx    eax, eax, ecx
+    add     r9d, eax
+    add     r10d, 8
+    jmp     ahead
+ahead_done:
+    cmp     r10d, edx
+    jae     fast
+slow_loop:
+    test    r10d, r10d
+    jnz     nobyte
+    movzx   eax, byte ptr [r11 + 1]
+    cmp     byte ptr [r11], 0FFh
+    jne     b_normal
+    cmp     eax, 8Fh
+    jbe     b_stuff
+    add     r9d, 0FF00h
+    mov     r10d, 8
+    mov     rax, qword ptr [rsp + L_STATE]
+    inc     dword ptr [rax + ST_EOBS]
+    jmp     nobyte
+b_stuff:
+    inc     r11
+    shl     eax, 9
+    add     r9d, eax
+    mov     r10d, 7
+    jmp     nobyte
+b_normal:
+    inc     r11
+    shl     eax, 8
+    add     r9d, eax
+    mov     r10d, 8
+nobyte:
+    add     r8d, r8d
+    add     r9d, r9d
+    dec     r10d
+    cmp     r8d, 8000h
+    jb      slow_loop
+    jmp     done
+fast:
+    shlx    r8d, r8d, edx
+    shlx    r9d, r9d, edx
+    sub     r10d, edx
+done:
+endm
+
+; Decodes a decision of the MQ decoder with branches, as opj_mqc_decode_macro(),
+; for the skewed contexts: the MPS without renormalization is the fast path.
+; in: r15 the context; jumps to t0 if the decision is 0, to t1 if it is 1
+; clobbers eax, ecx, edx, ebp
+MQ_DECODE_BR macro t0, t1
+    local lps, mpsx, xchg
+    mov     edx, dword ptr [r15]
+    mov     eax, edx
+    shr     eax, 16                     ; qeval
+    mov     ecx, edx
+    and     ecx, 0FFFF0000h
+    sub     r8d, eax
+    cmp     r9d, ecx
+    jb      lps
+    sub     r9d, ecx
+    test    r8d, 8000h
+    jz      mpsx
+    test    dl, 2
+    jz      t0
+    jmp     t1
+lps:
+    xor     ecx, ecx
+    cmp     r8d, eax
+    setae   cl                          ; LPS if a >= qeval
+    mov     r8d, eax
+    jmp     xchg
+mpsx:
+    xor     ecx, ecx
+    cmp     r8d, eax
+    setb    cl                          ; LPS if a < qeval
+xchg:
+    mov     ebp, edx
+    shr     ebp, 1
+    and     ebp, 1
+    xor     ebp, ecx                    ; the decision
+    movzx   eax, dl
+    add     eax, ecx
+    mov     rcx, qword ptr [rsp + L_TRANS]
+    mov     eax, dword ptr [rcx + rax * 4]
+    mov     dword ptr [r15], eax
+    bsr     edx, r8d
+    xor     edx, 15                     ; bits to renormalize a
+    MQ_RENORM_N
+    test    ebp, ebp
+    jz      t0
+    jmp     t1
+endm
+
 ; One sample of the refinement pass, as opj_t1_dec_refpass_step_mqc_macro()
 REFPASS_STEP macro ci
     local skip
@@ -476,113 +584,6 @@ CTX_UNI         equ 18
 L_CTXP          equ 64      ; context of the sign decision being decoded
 L_RUN           equ 40      ; first bit of the run length (L_LUTZC is unused here)
 
-; Shifts a and c left by edx bits, as opj_mqc_renormd_n_macro()
-; clobbers eax, ecx, edx
-MQ_RENORM_N macro
-    local fast, ahead, ahead_done, slow_loop, nobyte, b_normal, b_stuff, done
-    cmp     r10d, edx
-    jae     fast
-ahead:
-    cmp     r10d, 8
-    ja      ahead_done
-    cmp     byte ptr [r11], 0FFh
-    je      ahead_done
-    inc     r11
-    movzx   eax, byte ptr [r11]
-    mov     ecx, 8
-    sub     ecx, r10d
-    shlx    eax, eax, ecx
-    add     r9d, eax
-    add     r10d, 8
-    jmp     ahead
-ahead_done:
-    cmp     r10d, edx
-    jae     fast
-slow_loop:
-    test    r10d, r10d
-    jnz     nobyte
-    movzx   eax, byte ptr [r11 + 1]
-    cmp     byte ptr [r11], 0FFh
-    jne     b_normal
-    cmp     eax, 8Fh
-    jbe     b_stuff
-    add     r9d, 0FF00h
-    mov     r10d, 8
-    mov     rax, qword ptr [rsp + L_STATE]
-    inc     dword ptr [rax + ST_EOBS]
-    jmp     nobyte
-b_stuff:
-    inc     r11
-    shl     eax, 9
-    add     r9d, eax
-    mov     r10d, 7
-    jmp     nobyte
-b_normal:
-    inc     r11
-    shl     eax, 8
-    add     r9d, eax
-    mov     r10d, 8
-nobyte:
-    add     r8d, r8d
-    add     r9d, r9d
-    dec     r10d
-    cmp     r8d, 8000h
-    jb      slow_loop
-    jmp     done
-fast:
-    shlx    r8d, r8d, edx
-    shlx    r9d, r9d, edx
-    sub     r10d, edx
-done:
-endm
-
-; Decodes a decision of the MQ decoder with branches, as opj_mqc_decode_macro(),
-; for the skewed contexts: the MPS without renormalization is the fast path.
-; in: r15 the context; jumps to t0 if the decision is 0, to t1 if it is 1
-; clobbers eax, ecx, edx, ebp
-MQ_DECODE_BR macro t0, t1
-    local lps, mpsx, xchg
-    mov     edx, dword ptr [r15]
-    mov     eax, edx
-    shr     eax, 16                     ; qeval
-    mov     ecx, edx
-    and     ecx, 0FFFF0000h
-    sub     r8d, eax
-    cmp     r9d, ecx
-    jb      lps
-    sub     r9d, ecx
-    test    r8d, 8000h
-    jz      mpsx
-    test    dl, 2
-    jz      t0
-    jmp     t1
-lps:
-    xor     ecx, ecx
-    cmp     r8d, eax
-    setae   cl                          ; LPS if a >= qeval
-    mov     r8d, eax
-    jmp     xchg
-mpsx:
-    xor     ecx, ecx
-    cmp     r8d, eax
-    setb    cl                          ; LPS if a < qeval
-xchg:
-    mov     ebp, edx
-    shr     ebp, 1
-    and     ebp, 1
-    xor     ebp, ecx                    ; the decision
-    movzx   eax, dl
-    add     eax, ecx
-    mov     rcx, qword ptr [rsp + L_TRANS]
-    mov     eax, dword ptr [rcx + rax * 4]
-    mov     dword ptr [r15], eax
-    bsr     edx, r8d
-    xor     edx, 15                     ; bits to renormalize a
-    MQ_RENORM_N
-    test    ebp, ebp
-    jz      t0
-    jmp     t1
-endm
 
 ; Sign decoding of a sample that becomes significant in the cleanup pass:
 ; the second half of opj_t1_dec_clnpass_step_macro()
@@ -658,6 +659,7 @@ endm
 ; One sample of the cleanup pass, outside of the run mode:
 ; opj_t1_dec_clnpass_step_macro() with check_flags and not partial
 CLNPASS_STEP macro ci, sign, next
+    local neigh
     test    ebx, (T1_SIGMA_THIS or T1_PI_THIS) shl (3 * ci)
     jnz     next
     mov     eax, ebx
@@ -665,9 +667,20 @@ if ci ne 0
     shr     eax, 3 * ci
 endif
     and     eax, T1_SIGMA_NEIGH
-    movzx   eax, byte ptr [r13 + rax]
-    lea     r15, [r12 + rax * 4]
+    jnz     neigh
+    ; no significant neighbour: the very skewed context 0
+    mov     r15, r12
     MQ_DECODE_BR next, sign
+neigh:
+    movzx   eax, byte ptr [r13 + rax]
+    lea     rcx, [r12 + rax * 4]
+    mov     qword ptr [rsp + L_CTXP], rcx
+    mov     eax, dword ptr [rcx]
+    MQ_DECODE_NOBRANCH
+    mov     rdx, qword ptr [rsp + L_CTXP]
+    mov     dword ptr [rdx], ecx
+    test    ebp, ebp
+    jz      next
 sign:
     CLNPASS_SIGN ci
 endm
