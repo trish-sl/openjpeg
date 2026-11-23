@@ -90,6 +90,15 @@ typedef struct opj_mqc {
     const opj_mqc_state_t *ctxs[MQC_NUMCTXS];
     /** Active context */
     const opj_mqc_state_t **curctx;
+    /** Array of contexts of the decoder, with the states packed in a */
+    /** word, see opj_mqc_dec_state_qeval() and the like in mqc_inl.h */
+    OPJ_UINT32 dec_ctxs[MQC_NUMCTXS];
+    /** Active context of the decoder */
+    OPJ_UINT32 *dec_curctx;
+    /** State transitions of the decoder: the next state of a packed state */
+    /** s is dec_trans[(s & 0xFF) + 0] after a MPS, and */
+    /** dec_trans[(s & 0xFF) + 1] after a LPS */
+    const OPJ_UINT32 *dec_trans;
     /* lut_ctxno_zc shifted by (1 << 9) * bandno */
     const OPJ_BYTE* lut_ctxno_zc_orient;
     /** Original value of the 2 bytes at end[0] and end[1] */
@@ -137,6 +146,13 @@ Set the current context used for coding/decoding
 @param ctxno Number that identifies the context
 */
 #define opj_mqc_setcurctx(mqc, ctxno)   (mqc)->curctx = &(mqc)->ctxs[(OPJ_UINT32)(ctxno)]
+/**
+Set the current context used for decoding
+@param mqc MQC handle
+@param ctxno Number that identifies the context
+*/
+#define opj_mqc_setcurctx_dec(mqc, ctxno) \
+    (mqc)->dec_curctx = &(mqc)->dec_ctxs[(OPJ_UINT32)(ctxno)]
 
 /**
 Flush the encoder, so that all remaining data is written

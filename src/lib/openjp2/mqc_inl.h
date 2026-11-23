@@ -39,33 +39,6 @@
 #ifndef OPJ_MQC_INL_H
 #define OPJ_MQC_INL_H
 
-/* For internal use of opj_mqc_decode_macro() */
-#define opj_mqc_mpsexchange_macro(d, curctx, a) \
-{ \
-    if (a < (*curctx)->qeval) { \
-        d = !((*curctx)->mps); \
-        *curctx = (*curctx)->nlps; \
-    } else { \
-        d = (*curctx)->mps; \
-        *curctx = (*curctx)->nmps; \
-    } \
-}
-
-/* For internal use of opj_mqc_decode_macro() */
-#define opj_mqc_lpsexchange_macro(d, curctx, a) \
-{ \
-    if (a < (*curctx)->qeval) { \
-        a = (*curctx)->qeval; \
-        d = (*curctx)->mps; \
-        *curctx = (*curctx)->nmps; \
-    } else { \
-        a = (*curctx)->qeval; \
-        d = !((*curctx)->mps); \
-        *curctx = (*curctx)->nlps; \
-    } \
-}
-
-
 /**
 Decode a symbol using raw-decoder. Cfr p.506 TAUBMAN
 @param mqc MQC handle
@@ -123,6 +96,23 @@ static INLINE OPJ_UINT32 opj_mqc_raw_decode(opj_mqc_t *mqc)
 }
 
 /* For internal use of opj_mqc_decode_macro() */
+/* Input bytes before c runs out of bits, while there is room for them in */
+/* c (ct <= 8). This stops at a 0xFF byte, as the byte that follows it can */
+/* carry a bit into the previous ones, or be a marker: such bytes are left */
+/* to opj_mqc_bytein_macro(), when ct reaches 0. So c ends up with the same */
+/* value as if the bytes had been input one by one when needed. */
+/* Bytes read ahead (ct >= 8) are not counted as used by the PTERM check */
+/* of opj_t1_decode_cblk(). */
+#define opj_mqc_bytein_ahead_macro(mqc, c, ct) \
+{ \
+    while (ct <= 8U && *mqc->bp != 0xff) { \
+        mqc->bp++; \
+        c += (OPJ_UINT32)(*mqc->bp) << (8U - ct); \
+        ct += 8U; \
+    } \
+}
+
+/* For internal use of opj_mqc_decode_macro() */
 #define opj_mqc_renormd_macro(mqc, a, c, ct) \
 { \
     do { \
@@ -135,26 +125,76 @@ static INLINE OPJ_UINT32 opj_mqc_raw_decode(opj_mqc_t *mqc)
     } while (a < 0x8000); \
 }
 
+/* For internal use of opj_mqc_decode_macro() */
+/* Shift a and c left by n bits, n being the number of bits that */
+/* renormalize a. */
+#define opj_mqc_renormd_n_macro(mqc, a, c, ct, n) \
+{ \
+    if (ct < (n)) { \
+        opj_mqc_bytein_ahead_macro(mqc, c, ct); \
+    } \
+    if (ct >= (n)) { \
+        a <<= (n); \
+        c <<= (n); \
+        ct -= (n); \
+    } else { \
+        opj_mqc_renormd_macro(mqc, a, c, ct); \
+    } \
+}
+
+/* Context states of the decoder, in opj_mqc_t::dec_ctxs[]: */
+/* qeval in bits 16 to 31, in bits 8 to 11 the number of left shifts that */
+/* renormalize qeval, and in bits 0 to 7 twice the index of the state in */
+/* the state table, which puts mps in bit 1. */
+/* opj_mqc_t::dec_trans[(state & 0xFF) + 0] is the next state after a MPS */
+/* and opj_mqc_t::dec_trans[(state & 0xFF) + 1] the next state after a LPS */
+#define opj_mqc_dec_state_qeval(state) ((state) >> 16)
+#define opj_mqc_dec_state_nlps_shift(state) (((state) >> 8) & 0xFU)
+#define opj_mqc_dec_state_mps(state) (((state) >> 1) & 1U)
+
 #define opj_mqc_decode_macro(d, mqc, curctx, a, c, ct) \
 { \
     /* Implements ISO 15444-1 C.3.2 Decoding a decision (DECODE) */ \
     /* Note: alternate "J.2 - Decoding an MPS or an LPS in the */ \
     /* software-conventions decoder" has been tried, but does not bring any */ \
     /* improvement. See https://github.com/uclouvain/openjpeg/issues/921 */ \
-    a -= (*curctx)->qeval;  \
-    if ((c >> 16) < (*curctx)->qeval) {  \
-        opj_mqc_lpsexchange_macro(d, curctx, a);  \
-        opj_mqc_renormd_macro(mqc, a, c, ct);  \
-    } else {  \
-        c -= (*curctx)->qeval << 16;  \
+    const OPJ_UINT32 l_state = *(curctx); \
+    const OPJ_UINT32 l_qeval = opj_mqc_dec_state_qeval(l_state); \
+    a -= l_qeval; \
+    /* (c >> 16) < qeval */ \
+    if (c < (l_state & 0xFFFF0000U)) { \
+        /* LPS exchange */ \
+        const OPJ_UINT32 l_lps = (a >= l_qeval) ? 1U : 0U; \
+        const OPJ_UINT32 l_n = opj_mqc_dec_state_nlps_shift(l_state); \
+        d = opj_mqc_dec_state_mps(l_state) ^ l_lps; \
+        *(curctx) = (mqc)->dec_trans[(l_state & 0xFFU) + l_lps]; \
+        a = l_qeval; \
+        opj_mqc_renormd_n_macro(mqc, a, c, ct, l_n); \
+    } else { \
+        c -= l_state & 0xFFFF0000U; \
         if ((a & 0x8000) == 0) { \
-            opj_mqc_mpsexchange_macro(d, curctx, a); \
+            /* MPS exchange */ \
+            const OPJ_UINT32 l_lps = (a < l_qeval) ? 1U : 0U; \
+            d = opj_mqc_dec_state_mps(l_state) ^ l_lps; \
+            *(curctx) = (mqc)->dec_trans[(l_state & 0xFFU) + l_lps]; \
             opj_mqc_renormd_macro(mqc, a, c, ct); \
         } else { \
-            d = (*curctx)->mps; \
+            d = opj_mqc_dec_state_mps(l_state); \
         } \
     } \
 }
+
+#define DOWNLOAD_MQC_DEC_VARIABLES(mqc, curctx, a, c, ct) \
+        register OPJ_UINT32 *curctx = mqc->dec_curctx; \
+        register OPJ_UINT32 c = mqc->c; \
+        register OPJ_UINT32 a = mqc->a; \
+        register OPJ_UINT32 ct = mqc->ct
+
+#define UPLOAD_MQC_DEC_VARIABLES(mqc, curctx, a, c, ct) \
+        mqc->dec_curctx = curctx; \
+        mqc->c = c; \
+        mqc->a = a; \
+        mqc->ct = ct;
 
 #define DOWNLOAD_MQC_VARIABLES(mqc, curctx, a, c, ct) \
         register const opj_mqc_state_t **curctx = mqc->curctx; \
@@ -191,7 +231,7 @@ Decode a symbol
 @return Returns the decoded symbol (0 or 1) in d
 */
 #define opj_mqc_decode(d, mqc) \
-    opj_mqc_decode_macro(d, mqc, mqc->curctx, mqc->a, mqc->c, mqc->ct)
+    opj_mqc_decode_macro(d, mqc, mqc->dec_curctx, mqc->a, mqc->c, mqc->ct)
 
 /**
 Output a byte, doing bit-stuffing if necessary.
