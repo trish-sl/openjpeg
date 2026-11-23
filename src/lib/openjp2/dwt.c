@@ -56,11 +56,12 @@
 #include <immintrin.h>
 #endif
 
-/* With MSVC for x86-64, the 9-7 lifting of whole lines is also compiled */
-/* with AVX, and used when the CPU and the OS support it, whatever the */
-/* /arch option */
+/* With MSVC for x86-64, the 9-7 lifting of whole lines, and the */
+/* transposes around it in the horizontal pass, are also compiled with */
+/* AVX, and used when the CPU and the OS support it, whatever the /arch */
+/* option (unless OPJ_DWT_NO_AVX_DISPATCH is defined) */
 #if defined(_MSC_VER) && defined(_M_X64) && !defined(_M_ARM64EC) && \
-        defined(__SSE__)
+        defined(__SSE__) && !defined(OPJ_DWT_NO_AVX_DISPATCH)
 #define OPJ_DWT_AVX_DISPATCH
 #include <intrin.h>
 #include <immintrin.h>
@@ -68,6 +69,29 @@
 
 #if defined(__GNUC__)
 #pragma GCC poison malloc calloc realloc free
+#endif
+
+#ifdef OPJ_DWT_AVX_DISPATCH
+/** Whether the CPU and the OS support AVX: 0 not known yet, 1 yes, 2 no */
+static volatile int opj_dwt_avx_cpu = 0;
+
+static OPJ_BOOL opj_dwt_avx_ok(void)
+{
+    int cpu = opj_dwt_avx_cpu;
+    if (cpu == 0) {
+        int regs[4];
+        cpu = 2;
+        __cpuid(regs, 1);
+        /* ECX bit 27 OSXSAVE, bit 28 AVX, then the OS saves the */
+        /* XMM (bit 1) and YMM (bit 2) states */
+        if ((regs[2] & (1 << 27)) && (regs[2] & (1 << 28)) &&
+                (_xgetbv(0) & 6) == 6) {
+            cpu = 1;
+        }
+        opj_dwt_avx_cpu = cpu;
+    }
+    return cpu == 1;
+}
 #endif
 
 /** @defgroup DWT DWT - Implementation of a discrete wavelet transform */
@@ -3084,6 +3108,102 @@ static OPJ_BOOL opj_dwt_decode_partial_tile(
     return OPJ_TRUE;
 }
 
+#ifdef OPJ_DWT_AVX_DISPATCH
+/* Transposes 8 rows of 8 floats (moves only, so exact) */
+#define OPJ_TRANSPOSE8_PS(r0, r1, r2, r3, r4, r5, r6, r7) \
+    do { \
+        __m256 t0_ = _mm256_unpacklo_ps(r0, r1); \
+        __m256 t1_ = _mm256_unpackhi_ps(r0, r1); \
+        __m256 t2_ = _mm256_unpacklo_ps(r2, r3); \
+        __m256 t3_ = _mm256_unpackhi_ps(r2, r3); \
+        __m256 t4_ = _mm256_unpacklo_ps(r4, r5); \
+        __m256 t5_ = _mm256_unpackhi_ps(r4, r5); \
+        __m256 t6_ = _mm256_unpacklo_ps(r6, r7); \
+        __m256 t7_ = _mm256_unpackhi_ps(r6, r7); \
+        __m256 s0_ = _mm256_shuffle_ps(t0_, t2_, 0x44); \
+        __m256 s1_ = _mm256_shuffle_ps(t0_, t2_, 0xEE); \
+        __m256 s2_ = _mm256_shuffle_ps(t1_, t3_, 0x44); \
+        __m256 s3_ = _mm256_shuffle_ps(t1_, t3_, 0xEE); \
+        __m256 s4_ = _mm256_shuffle_ps(t4_, t6_, 0x44); \
+        __m256 s5_ = _mm256_shuffle_ps(t4_, t6_, 0xEE); \
+        __m256 s6_ = _mm256_shuffle_ps(t5_, t7_, 0x44); \
+        __m256 s7_ = _mm256_shuffle_ps(t5_, t7_, 0xEE); \
+        r0 = _mm256_permute2f128_ps(s0_, s4_, 0x20); \
+        r1 = _mm256_permute2f128_ps(s1_, s5_, 0x20); \
+        r2 = _mm256_permute2f128_ps(s2_, s6_, 0x20); \
+        r3 = _mm256_permute2f128_ps(s3_, s7_, 0x20); \
+        r4 = _mm256_permute2f128_ps(s0_, s4_, 0x31); \
+        r5 = _mm256_permute2f128_ps(s1_, s5_, 0x31); \
+        r6 = _mm256_permute2f128_ps(s2_, s6_, 0x31); \
+        r7 = _mm256_permute2f128_ps(s3_, s7_, 0x31); \
+    } while (0)
+
+/* The fast code path of opj_v8dwt_interleave_h() with AVX, for the */
+/* columns i to x1 - 1 by blocks of 8: returns where it stopped */
+static OPJ_UINT32 opj_v8dwt_interleave_h_avx(OPJ_FLOAT32* OPJ_RESTRICT bi,
+        const OPJ_FLOAT32* OPJ_RESTRICT a,
+        OPJ_SIZE_T width,
+        OPJ_UINT32 i,
+        OPJ_UINT32 x1)
+{
+    for (; i + 8 <= x1; i += 8) {
+        const OPJ_FLOAT32* src = a + i;
+        OPJ_FLOAT32* OPJ_RESTRICT dst = bi + i * 2 * NB_ELTS_V8;
+        __m256 r0 = _mm256_loadu_ps(src);
+        __m256 r1 = _mm256_loadu_ps(src + width);
+        __m256 r2 = _mm256_loadu_ps(src + 2 * width);
+        __m256 r3 = _mm256_loadu_ps(src + 3 * width);
+        __m256 r4 = _mm256_loadu_ps(src + 4 * width);
+        __m256 r5 = _mm256_loadu_ps(src + 5 * width);
+        __m256 r6 = _mm256_loadu_ps(src + 6 * width);
+        __m256 r7 = _mm256_loadu_ps(src + 7 * width);
+        OPJ_TRANSPOSE8_PS(r0, r1, r2, r3, r4, r5, r6, r7);
+        _mm256_storeu_ps(dst, r0);
+        _mm256_storeu_ps(dst + 2 * NB_ELTS_V8, r1);
+        _mm256_storeu_ps(dst + 4 * NB_ELTS_V8, r2);
+        _mm256_storeu_ps(dst + 6 * NB_ELTS_V8, r3);
+        _mm256_storeu_ps(dst + 8 * NB_ELTS_V8, r4);
+        _mm256_storeu_ps(dst + 10 * NB_ELTS_V8, r5);
+        _mm256_storeu_ps(dst + 12 * NB_ELTS_V8, r6);
+        _mm256_storeu_ps(dst + 14 * NB_ELTS_V8, r7);
+    }
+    _mm256_zeroupper();
+    return i;
+}
+
+/* The transposing part of opj_v8dwt_store_h() with AVX, for the samples */
+/* 0 to rw - 1 by blocks of 8: returns where it stopped */
+static OPJ_UINT32 opj_v8dwt_store_h_avx(const opj_v8_t* OPJ_RESTRICT wavelet,
+                                        OPJ_FLOAT32* OPJ_RESTRICT aj,
+                                        OPJ_UINT32 rw,
+                                        OPJ_SIZE_T w)
+{
+    OPJ_UINT32 k;
+    for (k = 0; k + 8 <= rw; k += 8) {
+        OPJ_FLOAT32* OPJ_RESTRICT dst = aj + k;
+        __m256 r0 = _mm256_loadu_ps(wavelet[k].f);
+        __m256 r1 = _mm256_loadu_ps(wavelet[k + 1].f);
+        __m256 r2 = _mm256_loadu_ps(wavelet[k + 2].f);
+        __m256 r3 = _mm256_loadu_ps(wavelet[k + 3].f);
+        __m256 r4 = _mm256_loadu_ps(wavelet[k + 4].f);
+        __m256 r5 = _mm256_loadu_ps(wavelet[k + 5].f);
+        __m256 r6 = _mm256_loadu_ps(wavelet[k + 6].f);
+        __m256 r7 = _mm256_loadu_ps(wavelet[k + 7].f);
+        OPJ_TRANSPOSE8_PS(r0, r1, r2, r3, r4, r5, r6, r7);
+        _mm256_storeu_ps(dst, r0);
+        _mm256_storeu_ps(dst + w, r1);
+        _mm256_storeu_ps(dst + 2 * w, r2);
+        _mm256_storeu_ps(dst + 3 * w, r3);
+        _mm256_storeu_ps(dst + 4 * w, r4);
+        _mm256_storeu_ps(dst + 5 * w, r5);
+        _mm256_storeu_ps(dst + 6 * w, r6);
+        _mm256_storeu_ps(dst + 7 * w, r7);
+    }
+    _mm256_zeroupper();
+    return k;
+}
+#endif /* OPJ_DWT_AVX_DISPATCH */
+
 static void opj_v8dwt_interleave_h(opj_v8dwt_t* OPJ_RESTRICT dwt,
                                    OPJ_FLOAT32* OPJ_RESTRICT a,
                                    OPJ_UINT32 width,
@@ -3099,6 +3219,11 @@ static void opj_v8dwt_interleave_h(opj_v8dwt_t* OPJ_RESTRICT dwt,
                 ((OPJ_SIZE_T) bi & 0x0f) == 0) {
             /* Fast code path */
             i = x0;
+#ifdef OPJ_DWT_AVX_DISPATCH
+            if (opj_dwt_avx_ok()) {
+                i = opj_v8dwt_interleave_h_avx(bi, a, width, i, x1);
+            }
+#endif
 #ifdef __SSE__
             /* Transpose blocks of 4 columns x 4 rows */
             for (; i + 4 <= x1; i += 4) {
@@ -3511,27 +3636,6 @@ static void opj_v8dwt_decode_fused_sse(opj_v8dwt_t* OPJ_RESTRICT dwt,
 #endif
 
 #ifdef OPJ_DWT_AVX_DISPATCH
-/** Whether the CPU and the OS support AVX: 0 not known yet, 1 yes, 2 no */
-static volatile int opj_dwt_avx_cpu = 0;
-
-static OPJ_BOOL opj_dwt_avx_ok(void)
-{
-    int cpu = opj_dwt_avx_cpu;
-    if (cpu == 0) {
-        int regs[4];
-        cpu = 2;
-        __cpuid(regs, 1);
-        /* ECX bit 27 OSXSAVE, bit 28 AVX, then the OS saves the */
-        /* XMM (bit 1) and YMM (bit 2) states */
-        if ((regs[2] & (1 << 27)) && (regs[2] & (1 << 28)) &&
-                (_xgetbv(0) & 6) == 6) {
-            cpu = 1;
-        }
-        opj_dwt_avx_cpu = cpu;
-    }
-    return cpu == 1;
-}
-
 #define OPJ_V8_LD(f, k) _mm256_loadu_ps((f) + 8 * (k))
 #define OPJ_V8_ST(f, k, v) _mm256_storeu_ps((f) + 8 * (k), (v))
 
@@ -3730,6 +3834,11 @@ static void opj_v8dwt_store_h(const opj_v8_t* OPJ_RESTRICT wavelet,
                               OPJ_SIZE_T w)
 {
     OPJ_UINT32 k = 0;
+#ifdef OPJ_DWT_AVX_DISPATCH
+    if (opj_dwt_avx_ok()) {
+        k = opj_v8dwt_store_h_avx(wavelet, aj, rw, w);
+    }
+#endif
 #ifdef __SSE__
     /* Transpose blocks of 4 samples x 4 rows */
     for (; k + 4 <= rw; k += 4) {
