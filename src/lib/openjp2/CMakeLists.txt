@@ -76,6 +76,21 @@ if(OPJ_DISABLE_TPSOT_FIX)
   add_definitions(-DOPJ_DISABLE_TPSOT_FIX)
 endif()
 
+# x86-64 assembly of tier-1 decoding passes, in MASM syntax: MSVC x64 only.
+# t1.c uses it when OPJ_T1_DEC_X64_ASM is defined and the CPU has BMI1 and
+# BMI2, and its C code otherwise.
+option(OPJ_USE_T1_X64_ASM "Use the x86-64 assembly of tier-1 decoding passes (MSVC x64)" ON)
+if(OPJ_USE_T1_X64_ASM AND MSVC AND CMAKE_SIZEOF_VOID_P EQUAL 8 AND
+   ("${CMAKE_C_COMPILER_ARCHITECTURE_ID}" STREQUAL "x64" OR
+    "${MSVC_C_ARCHITECTURE_ID}" STREQUAL "x64"))
+  enable_language(ASM_MASM)
+  add_definitions(-DOPJ_T1_DEC_X64_ASM)
+  set(OPENJPEG_SRCS
+    ${OPENJPEG_SRCS}
+    ${CMAKE_CURRENT_SOURCE_DIR}/t1_dec_x64.asm
+  )
+endif()
+
 # Special case for old i586-mingw32msvc-gcc cross compiler
 if(NOT WIN32 AND CMAKE_COMPILER_IS_GNUCC AND CMAKE_C_COMPILER MATCHES ".*mingw32msvc.*" )
   set(WIN32 YES)
